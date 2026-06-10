@@ -1,0 +1,116 @@
+{
+  "slug": "t6-deploy-hardening",
+  "source_type": "idea",
+  "mode": "L1",
+  "title": "T6 部署加固(运行时基线验证 + 成本告警 + 部署链护栏,做小)",
+  "summary": "把部署运行时从「能跑」升级为「已验证」:Cloud Run startup probe 配置 + 关停时间预算对账 + 清偿 DEPLOY.md §9 双缩零 DEFERRED 验收欠债;账单加被动告警层(GCP budget 三档阈值触达邮箱);部署链加只读前置校验脚本(IAM/secret/镜像/DSN 四项)与蓝绿候选正式文档路径。持久 preview 环境 defer 到客户端联调需求出现(明博 R3 拍板)。全程做小:零新 Go 依赖、零自动化部署、零新环境、零坐标泄露、config 零改动。",
+  "goal_alignment": {
+    "status": "clear",
+    "target_user": "明博(单人开发)的部署运维面 + 服务自身运行时稳态;无外部最终用户",
+    "problem": "部署链停留在 T0 最小闭环:Cloud Run 探针零配置、关停预算从未与宽限期对账、双缩零验收标 DEFERRED 未线上验证、账单无主动通知、runbook 高频易错步骤无前置拦截",
+    "success_outcome": "部署运行时基线可验证(probe + 关停对账 + 欠债清偿)+ 账单阈值触达邮箱 + 前置校验拦四类高频配置错误 + 主线外验证有正式文档路径;不引入常驻进程/IaC/自动化部署/新环境",
+    "scope_boundary": "做 = probe 配置/关停对账/欠债验收/budget alert/只读校验脚本/蓝绿候选文档化;不做 = 持久 preview(defer 客户端联调)/Neon 自动告警/liveness probe/IaC/CD/APM/多 region",
+    "first_acceptance_signal": "部署前置校验脚本在故意拔掉 IAM secretAccessor 授权的环境下非零退出并指明缺失项",
+    "confidence": "high",
+    "alternatives_considered": []
+  },
+  "goals": [
+    "部署运行时基线从「能跑」变为「已验证」:probe 配置、关停预算对账、双缩零历史欠债清偿",
+    "账单异常从「月底才知道」变为「阈值触达邮箱」(云侧被动,零代码)",
+    "部署 runbook 高频错误有前置拦截(只读校验脚本)+ 主线外验证有正式路径(蓝绿候选文档化)",
+    "全程守做小:零新 Go 依赖、零自动化部署、零新环境、零坐标泄露"
+  ],
+  "non_goals": [
+    "不建持久 preview 环境(第二 Cloud Run service + Neon branch)——触发条件:客户端 app-infra-toolkit 联调需求出现时按真实形状另行 forge(D1)",
+    "不做 Neon 用量自动告警/轮询——撞 NFR1 无常驻进程红线 + 需新 secret,降级 runbook 手动检查(D2)",
+    "不配 liveness probe——配错即实例循环杀,本站只配 startup probe(D4)",
+    "不做 IaC(Terraform/Pulumi),不引入 service.yaml 声明式部署路径(D7)",
+    "不做 CD/部署自动化;gcloud 写操作维持「刻意不进脚本」(D6/D9)",
+    "不做 APM/分布式 tracing/多 region/告警分级/on-call 体系",
+    "不新增主动探测(任何周期性请求服务的任务,防唤醒缩零实例烧钱)",
+    "不动 config 机制(不加 APP_ENV/profile/新 secret/日志 env 字段)(D8)"
+  ],
+  "assumptions": [
+    {"id": "A1", "text": "Cloud Run 的 SIGTERM 宽限期(terminationGracePeriodSeconds)默认 10 秒量级,代码侧排空预算(HTTP 5s + 池 2s = 7s)在其内;T3 写 runbook 时对照 GCP 文档核实具体数值", "confidence": "medium"},
+    {"id": "A2", "text": "HTTP 先排空 + pgxpool.Close 阻塞等连接归还,已足以保证正常路径 in-flight query 不被截断(NG9 主动编排无增量);由 FR2 排空测试验证", "confidence": "medium"},
+    {"id": "A3", "text": "GCP budget 通知可配置到指定邮箱(monitoring notification channel),不限于 billing admin 默认收件人;T5 任务实操时核实,不通则修通知渠道", "confidence": "medium"},
+    {"id": "A4", "text": "蓝绿候选机制(gcloud run deploy --no-traffic --tag candidate)在现有 service 上可用,与 DEPLOY.md §4b 描述一致", "confidence": "high"}
+  ],
+  "requirements": [
+    {"id": "FR1", "type": "functional", "description": "Cloud Run 配置 startup probe 指向 /livez(绝非 /healthz,GCP 边缘保留),参数在 runbook 给出数值与冷启动余量论证;liveness probe 本站不配置,进程挂死发现手段缺位记录为已接受风险", "priority": "must"},
+    {"id": "FR2", "type": "functional", "description": "关停时间预算对账:(a) 排空逻辑自动化测试——人为延迟请求在 shutdown 触发后收到完整响应、新请求被拒、shutdown 在预算内返回(允许把 main.go 关停块抽为行为不变的可测函数);(b) 预算锚定断言——HTTP 排空预算 + 池关闭预算之和 ≤ runbook 声明的宽限期数值。NG9 收口为本条,不做主动连接编排", "priority": "must"},
+    {"id": "FR3", "type": "functional", "description": "清偿 DEPLOY.md §9 双缩零 DEFERRED 验收:线上实走一次(服务与 Neon 同时缩零后唤醒),冷启动首请求时延与 db_retry 日志观测数值回写 runbook,状态改为含日期的已验证记录", "priority": "must"},
+    {"id": "FR4", "type": "functional", "description": "GCP Billing budget:月预算 + 50%/90%/100% 三档阈值,通知可达明博邮箱(一次性测试通知确认);runbook 含创建命令模板,billing account id 用占位符", "priority": "must"},
+    {"id": "FR5", "type": "functional", "description": "Neon 用量手动检查:runbook 新章节(控制台入口路径 + 关注指标清单 + 红线数值),零代码、零轮询、零新 secret", "priority": "must"},
+    {"id": "FR6", "type": "functional", "description": "部署前置校验脚本(scripts/,只读幂等):检查运行时 SA 的 secretAccessor 绑定、secret 存在且最新版可读、镜像 tag 已推、DSN 含 sslmode=require;任一缺失退出码非 0 并指明缺失项;不进 verify.sh、不进 CI", "priority": "must"},
+    {"id": "FR7", "type": "functional", "description": "蓝绿候选机制(--no-traffic --tag candidate)文档化为正式「主线外验证」章节(候选部署 → 候选 URL 冒烟 → 切流量 → 回滚各步命令可照抄);持久 preview 显式 defer", "priority": "must"},
+    {"id": "FR8", "type": "functional", "description": "回滚链一次实走演练(部署候选 → 切流量 → 回退到前一 revision),结果(日期 + revision 名)回写 runbook", "priority": "should"},
+    {"id": "FR9", "type": "functional", "description": "docs/CONTRACTS.md append T6 范围声明:工件落点(scripts/+docs/,无新第一层目录)、无新 env var/端点/secret、verify.sh 仍唯一 CI 入口、部署校验脚本属部署链非 CI gate", "priority": "must"},
+    {"id": "NFR1", "type": "non_functional", "description": "无主动探测:不新增任何周期性请求服务的任务(Cloud Scheduler/cron/CI 定时),监控只用云厂商被动侧数据", "priority": "must"},
+    {"id": "NFR2", "type": "non_functional", "description": "坐标零泄露:真实 GCP 坐标(project number/region/服务域名/billing account)只存在于本地 .env;T6 落地后全仓 grep 无命中,文档一律占位符", "priority": "must"},
+    {"id": "NFR3", "type": "non_functional", "description": "冻结契约不破:第一层目录树不变、config 机制零改动、/livez 无 DB 守卫不破、verify.sh 唯一 CI 入口、gcloud 写操作不进脚本", "priority": "must"},
+    {"id": "NFR4", "type": "non_functional", "description": "做小纪律:无 IaC、无 CD workflow、无第二 Cloud Run service、无新 secret、无新 Go 依赖", "priority": "must"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC1", "description": "Given Cloud Run 已按 runbook 配置指向 /livez 的 startup probe,when 服务缩零后连续 3 次冷启动发首请求,then 每次首请求返回 200,revisions 列表无 revision 处于非 Ready 或重启循环状态,且 probe path 字段值等于 /livez", "verifiable_by": "manual_check", "requirement_refs": ["FR1"]},
+    {"id": "AC2", "description": "Given 关停排空逻辑,when 自动化测试发起一个人为延迟大于等于 3 秒的请求并随即触发 shutdown,then 该请求收到完整 200 响应、shutdown 调用在声明预算内返回、shutdown 开始后的新请求被拒绝", "verifiable_by": "automated_test", "requirement_refs": ["FR2"]},
+    {"id": "AC3", "description": "Given 代码侧关停预算常量,when 运行预算锚定测试,then HTTP 排空预算与池关闭预算之和小于等于 10 秒(runbook 声明的宽限期数值),改动任一常量该测试变红", "verifiable_by": "automated_test", "requirement_refs": ["FR2"]},
+    {"id": "AC4", "description": "Given DEPLOY.md §9 标 DEFERRED 的双缩零验收,when 按 runbook 在线上实走一次,then §9 更新为含日期、冷启动首请求时延数值、db_retry 日志条目观测结果的已验证记录,DEFERRED 标记消失", "verifiable_by": "manual_check", "requirement_refs": ["FR3"]},
+    {"id": "AC5", "description": "Given 按 runbook 模板创建的 GCP budget(50%/90%/100% 三档),when 发送一次测试通知,then 明博邮箱收到该通知,且 runbook 模板中 billing account id 为占位符", "verifiable_by": "manual_check", "requirement_refs": ["FR4"]},
+    {"id": "AC6", "description": "Given runbook 的 Neon 用量检查章节,when 审查该章节与全仓代码,then 章节含控制台入口路径、指标清单、红线数值三要素,且仓库无 Neon API key 引用、无周期性用量拉取代码", "verifiable_by": "code_review", "requirement_refs": ["FR5"]},
+    {"id": "AC7", "description": "Given 部署前置校验脚本,when 在四项配置各自故意置缺的环境下分别执行,then 每次退出码非 0 且输出指明缺失项;四项齐备时退出码 0", "verifiable_by": "manual_check", "requirement_refs": ["FR6"]},
+    {"id": "AC8", "description": "Given 校验脚本落地,when 审查 verify.sh 与 .github/workflows/,then verify.sh 不引用该脚本,workflows 目录无新增文件与新增步骤", "verifiable_by": "code_review", "requirement_refs": ["FR6", "NFR3"]},
+    {"id": "AC9", "description": "Given runbook 的主线外验证章节,when 照章节命令执行一遍(候选部署不切流量 → 候选 URL 冒烟 → 切流量 → 回滚),then 每步命令可照抄执行,回滚后线上 /livez 返回的 version 等于前一 revision 的 SHA,演练结果(日期 + revision 名)回写 runbook", "verifiable_by": "manual_check", "requirement_refs": ["FR7", "FR8"]},
+    {"id": "AC10", "description": "Given T6 全部落地,when 审查仓库,then CONTRACTS.md 含 T6 范围声明节、第一层目录集合与 §1.1 冻结清单一致、internal/platform/config/ 无改动、按 runbook 给定的 grep 模式全仓无真实 GCP 坐标命中", "verifiable_by": "code_review", "requirement_refs": ["FR9", "NFR2", "NFR3"]},
+    {"id": "AC11", "description": "Given T6 落地,when 审查仓库与 GCP 项目,then 无新增周期性请求服务的任务、无新增 GitHub workflow、无 Terraform/Pulumi 文件、无第二个 Cloud Run service、go.mod 无新增依赖", "verifiable_by": "code_review", "requirement_refs": ["NFR1", "NFR4"]},
+    {"id": "AC12", "description": "Given startup probe 配置完成,when 审查 Cloud Run 服务配置与 runbook,then liveness probe 字段未设置,且「进程挂死的发现手段缺位」作为已接受风险记录于 runbook", "verifiable_by": "code_review", "requirement_refs": ["FR1"]}
+  ],
+  "edge_cases": [
+    {"id": "E1", "description": "probe 参数过紧,冷启动期实例被判不健康进入重启循环", "expected_behavior": "runbook 参数附冷启动余量论证;AC1 三连冷启动验证兜底"},
+    {"id": "E2", "description": "budget 通知发给 billing admin 默认渠道而非明博常用邮箱", "expected_behavior": "AC5 测试通知步骤暴露此问题,修正通知渠道后重验"},
+    {"id": "E3", "description": "校验脚本在无 gcloud 凭据的机器上执行", "expected_behavior": "输出指明「凭据缺失」并非零退出,不误报为配置缺失"},
+    {"id": "E4", "description": "回滚演练时服务只有一个 revision,无可回退目标", "expected_behavior": "runbook 标注演练前提(至少 2 个 revision)"},
+    {"id": "E5", "description": "双缩零验收撞上 Neon 维护窗口或异常波动", "expected_behavior": "记录原因并重跑,不把失真数值写入 runbook"},
+    {"id": "E6", "description": "坐标 grep 自查误报(占位符/文档示例命中)", "expected_behavior": "grep 模式只匹配真实值形态(数字 project number、真实 region 字符串),runbook 注明白名单"}
+  ],
+  "risks": [
+    {"id": "R1", "description": "liveness 不配,进程挂死(死锁/活锁)无自动发现", "impact": "medium", "likelihood": "low", "mitigation": "Cloud Run 对 crash 自动重启 + 缩零天然轮换实例;作为已接受风险记录(D4)", "owner": "engineering"},
+    {"id": "R2", "description": "budget alert 滞后于 GCP 账单数据延迟(24h+),单日异常烧钱发现偏晚", "impact": "medium", "likelihood": "low", "mitigation": "实时防线是 max-instances=2 与 T5 请求体/条数硬上限,alert 定位为事后知情层(D3)", "owner": "Mingbo"},
+    {"id": "R3", "description": "GCP 侧手工配置(probe/budget)与 runbook 声明漂移", "impact": "low", "likelihood": "medium", "mitigation": "runbook 附 describe 只读对账命令,部署检查清单含一次对账", "owner": "ops"},
+    {"id": "R4", "description": "部署仍手动,人为抄错 runbook", "impact": "medium", "likelihood": "medium", "mitigation": "前置校验脚本拦四类高频错 + 蓝绿候选先冒烟再切流量 + 回滚演练过(D9 显式接受)", "owner": "Mingbo"},
+    {"id": "R5", "description": "defer 持久 preview,客户端联调启动时临时搭环境仓促", "impact": "low", "likelihood": "medium", "mitigation": "D1 记录触发条件,客户端接入 session 自带 forge,届时按真实需求形状设计", "owner": "Mingbo"}
+  ],
+  "default_decisions": [
+    {"id": "D1", "decision": "G3 preview 按明博选定锁定:复用现有蓝绿候选机制并文档化,持久 preview(第二 service + Neon branch)defer", "reason": "R3 选择题明博选定;现有候选机制覆盖主线外验证大部分诉求,持久 preview 四重新风险(孤儿 branch 计费/配置漂移/攻击面/坐标泄露)无现时收益", "override_if": "客户端 app-infra-toolkit 联调需求出现,另起 forge"},
+    {"id": "D2", "decision": "G1 拆分:GCP budget alert 做,Neon 用量自动告警不做(降级 runbook 手动检查)", "reason": "自动化需轮询任务 + 新 secret,撞 NFR1 无常驻进程与 T7 backlog 边界", "override_if": "Neon 当前 plan 提供原生阈值推送,则改为控制台配置(仍零代码)"},
+    {"id": "D3", "decision": "告警验收从「天级发现异常」降为「三档阈值通知可达邮箱」", "reason": "GCP 账单数据自身延迟 24h+,端到端发现时延无法承诺,写进验收就是假承诺", "override_if": "无"},
+    {"id": "D4", "decision": "只配 startup probe,不配 liveness probe", "reason": "liveness 配错 = 实例循环杀(爆炸半径大于收益);挂死场景有 crash 自动重启 + 缩零轮换兜底", "override_if": "线上出现真实挂死事故"},
+    {"id": "D5", "decision": "NG9「完整连接 draining」收口为预算对账 + 排空自动化测试,不做主动连接编排", "reason": "HTTP 先排空 + pgxpool.Close 阻塞归还已覆盖正常路径,主动编排无明确增量收益", "override_if": "FR2 测试发现 in-flight query 被截断"},
+    {"id": "D6", "decision": "G4 限只读前置校验;gcloud 写操作维持「刻意不进脚本」", "reason": "DEPLOY.md 既有有意决策(高危操作人在回路),公开仓库下尤其如此", "override_if": "无"},
+    {"id": "D7", "decision": "T6 工件全落 scripts/ + docs/,不开新第一层目录,不引入 service.yaml 部署路径(期望值写 runbook + describe 只读对账)", "reason": "§1.1 目录树冻结 + 做小;声明式文件与命令式部署并存会产生双真相漂移", "override_if": "部署工件类增多到散乱,走受控演进出口开 deploy/"},
+    {"id": "D8", "decision": "不加 APP_ENV/日志 env 字段,config 零改动", "reason": "D1 选定后无环境标识需求;没有明确收益的复杂度默认拒绝", "override_if": "持久 preview 落地时(届时新 env var 经 os.Getenv 是纯 append,不违宪)"},
+    {"id": "D9", "decision": "接受部署保持手动,T6 只加护栏不加自动化", "reason": "部署自动化 = 过早平台化,违单人节奏 + 保守域;红队 all-options-wrong 分析的显式回应——把「手动部署 + 护栏」从隐性现状变为显式决策", "override_if": "部署频率显著上升或转多人协作"}
+  ],
+  "open_questions": [],
+  "tasks": [
+    {"id": "T1", "description": "关停排空可测化(允许将 main.go 关停块抽为行为不变的可测函数)+ 排空自动化测试 + 预算锚定断言;verify.sh 全绿", "owner_agent": "implementer", "deps": [], "done_when": ["AC2", "AC3"]},
+    {"id": "T2", "description": "部署前置校验脚本 scripts/deploy-precheck.sh(四项只读检查,凭据缺失与配置缺失输出区分);不接入 CI", "owner_agent": "implementer", "deps": [], "done_when": ["AC7", "AC8"]},
+    {"id": "T3", "description": "runbook 大修(startup probe 模板与参数论证、宽限期声明、蓝绿候选正式章节、Neon 用量章节、liveness 已接受风险、坐标 grep 自查模式)+ CONTRACTS.md T6 范围声明 append", "owner_agent": "implementer", "deps": [], "done_when": ["AC6", "AC10"]},
+    {"id": "T4", "description": "GCP 实操:配置 startup probe + 三连冷启动验证 + 确认 liveness 未配(明博在协调者引导下照 runbook 执行)", "owner_agent": "main_coordinator", "deps": ["T3"], "done_when": ["AC1", "AC12"]},
+    {"id": "T5", "description": "GCP 实操:创建 budget(三档)+ 测试通知确认可达明博邮箱", "owner_agent": "main_coordinator", "deps": ["T3"], "done_when": ["AC5"]},
+    {"id": "T6", "description": "线上实操:双缩零 DEFERRED 验收实走 + 观测数值回写 runbook", "owner_agent": "main_coordinator", "deps": ["T3", "T4"], "done_when": ["AC4"]},
+    {"id": "T7", "description": "线上实操:蓝绿候选全流程演练含回滚实走 + 结果回写 runbook", "owner_agent": "main_coordinator", "deps": ["T3", "T4"], "done_when": ["AC9"]},
+    {"id": "T8", "description": "终审:脚本不进 CI、无主动探测、无 IaC/新依赖/第二 service、坐标 grep、冻结契约逐项核验", "owner_agent": "reviewer", "deps": ["T1", "T2", "T3"], "done_when": ["AC8", "AC11"]}
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/t6-deploy-hardening/prd.md",
+    "handoff": "product-requirements/t6-deploy-hardening/handoff.json"
+  },
+  "next_prompt": "用本 handoff 落地 T6 部署加固(做小):T1/T2/T3 三个 implementer 任务无依赖可并行——T1 关停排空可测化 + 排空测试 + 预算锚定断言(允许抽函数不改行为,verify.sh 全绿);T2 scripts/deploy-precheck.sh 四项只读校验(IAM secretAccessor/secret 可读/镜像已推/DSN 含 sslmode,凭据缺失与配置缺失区分输出,不进 verify.sh 不进 CI);T3 runbook 大修(probe 模板+参数论证、宽限期声明、蓝绿候选正式章节、Neon 用量章节、liveness 已接受风险、坐标 grep 模式)+ CONTRACTS T6 append。然后 T4-T7 是 GCP/线上实操,owner 是 main_coordinator(协调者引导明博照 runbook 执行):T4 startup probe 配置+三连冷启动验证、T5 budget 三档+测试通知、T6 双缩零 DEFERRED 验收实走、T7 蓝绿候选+回滚演练。最后 T8 reviewer 终审。铁律:gcloud 写操作不进脚本、无 IaC、无新依赖、无第二 service、config 零改动、真实 GCP 坐标只在本地 .env。明博已拍板 D1:持久 preview defer 到客户端联调。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": ["codebase-scan", "requirement", "redteam", "implementation", "architecture"],
+    "codex_used": false,
+    "codex_downgraded": false
+  }
+}
