@@ -382,9 +382,11 @@ gcloud run services update-traffic server-infra-toolkit --to-revisions=<prev-rev
 
 ### 12.5 演练记录(T7 实操回写)
 
-> 以下待 T7 蓝绿候选 + 回滚实走演练后回写:演练日期、候选 revision 名、回退目标 revision 名、回滚后 `/livez` 的 `version` 值。
-
-- **状态:DEFERRED(尚未演练)。** 待 T7 实操后填入上述四项,DEFERRED 标记消失(对应 AC9 回写要求)。
+- **演练日期**:2026-06-10
+- **候选 revision**:`server-infra-toolkit-00005-lew`(镜像 tag `40f57b2`)
+- **回退目标 revision**:`server-infra-toolkit-00003-hzg`(version `56bc6eb`)
+- **回滚后 `/livez` 的 `version`**:`56bc6eb`(`scripts/smoke.sh <prod-url> 56bc6eb` 断言通过)
+- **全链路实走结果**:候选部署(0% 流量)→ 候选 URL 冒烟绿 → 切流(生产冒烟绿,version=`40f57b2`)→ 显式回滚(生产冒烟绿,version 退回 `56bc6eb`)→ 切回 LATEST 恢复(生产冒烟绿,version=`40f57b2`)。每步均以 `scripts/smoke.sh` 外部可观测断言背书,部署前置由 `scripts/deploy-precheck.sh` 四项全绿放行。
 
 ---
 
