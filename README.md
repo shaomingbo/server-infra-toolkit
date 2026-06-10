@@ -12,12 +12,12 @@
 
 ## 现状
 
-T0–T3 与 T5 已落地:HTTP 壳 + `/livez` + 统一错误信封 + 结构化日志(T0)、连接池 + 重试 + sqlc/goose 工具链(T1)、login/refresh 认证 + 账户锁定防线(T2)、wire 契约 schema 真相源 + conformance 防线(T3)、observability 批量事件接收 + 入站契约校验 + 幂等落库(T5,接缝先行:端点默认挂 feature flag 后不公网暴露)。中期 ROADMAP(按 ROI 排序)见:
+T0–T3、T5 与 T6 已落地:HTTP 壳 + `/livez` + 统一错误信封 + 结构化日志(T0)、连接池 + 重试 + sqlc/goose 工具链(T1)、login/refresh 认证 + 账户锁定防线(T2)、wire 契约 schema 真相源 + conformance 防线(T3)、observability 批量事件接收 + 入站契约校验 + 幂等落库(T5,接缝先行:端点默认挂 feature flag 后不公网暴露)、startup probe + 关停预算对账 + 部署前置校验 + 蓝绿/双缩零线上实走验收(T6)。中期 ROADMAP(按 ROI 排序)见:
 
 - [`product-requirements/server-infra-roadmap/prd.md`](product-requirements/server-infra-roadmap/prd.md) — 完整 PRD(14 节)
 - [`product-requirements/server-infra-roadmap/handoff.json`](product-requirements/server-infra-roadmap/handoff.json) — 机器可读的任务与依赖清单
 
-推进顺序:**T0** 线上最小闭环 → **T1** 数据接入层 → **T2** auth → **T3** 契约对账 → **T5** 事件接收(ROI 复评先于 T4 推进)→ **T4** 离线包 → **T6** 部署加固;**T7/T8** 为业务触发的 backlog。
+推进顺序:**T0** 线上最小闭环 → **T1** 数据接入层 → **T2** auth → **T3** 契约对账 → **T5** 事件接收 → **T6** 部署加固(与 T4 先后经 ROI 复评对调:T4 的签名验真依赖客户端对端)→ **T4** 离线包(待客户端联调窗口);**T7/T8** 为业务触发的 backlog。
 
 每个推进站独立锻造一份 PRD 后再落地,走结构化 PRD 流程(发散批判 → 收敛决策 → 验收标准)。
 
