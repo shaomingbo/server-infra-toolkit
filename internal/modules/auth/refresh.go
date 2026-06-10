@@ -118,7 +118,9 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 	session, ok, err := h.rotateRefresh(r.Context(), selector, verifier)
 	if err != nil {
 		// A server-side failure (DB error, CSPRNG down). Do NOT leak the cause or
-		// any credential; emit a generic 500.
+		// any credential; emit a generic 500. Log the cause server-side (incl. pgx
+		// SQLSTATE) so the generic 500 is still diagnosable in Cloud Logging.
+		logInternalError("refresh.rotate", requestID, err)
 		writeError(w, http.StatusInternalServerError, codeInternal, "internal server error", requestID)
 		return
 	}

@@ -138,7 +138,9 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	authedUser, ok, err := h.verifyCredentials(r.Context(), requestID, req.Username, req.Password)
 	if err != nil {
 		// A server-side failure (CSPRNG down, DB error during lookup). Do NOT leak
-		// the cause or any credential; emit a generic 500.
+		// the cause or any credential; emit a generic 500. Log the cause server-side
+		// (incl. pgx SQLSTATE) so the generic 500 is still diagnosable in Cloud Logging.
+		logInternalError("login.verify_credentials", requestID, err)
 		writeError(w, http.StatusInternalServerError, codeInternal, "internal server error", requestID)
 		return
 	}
@@ -156,6 +158,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	// the LoginSession. expiresAt is the access token's expiry in Unix ms.
 	session, err := h.issueSession(r.Context(), authedUser.ID)
 	if err != nil {
+		logInternalError("login.issue_session", requestID, err)
 		writeError(w, http.StatusInternalServerError, codeInternal, "internal server error", requestID)
 		return
 	}
