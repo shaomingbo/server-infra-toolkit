@@ -1,0 +1,50 @@
+name: verify
+
+on: [push, pull_request]
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    # Postgres service container for the migration gate (FR11/AC13). It is a
+    # throwaway localhost Postgres on 127.0.0.1:5432 with container-only
+    # credentials below — NEVER a real managed database. The health check
+    # (pg_isready) makes the job wait until Postgres accepts connections before
+    # the steps run.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: verify
+          POSTGRES_DB: verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d verify"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Migration gate target: the Postgres service container above, reached on
+      # localhost. Container-only credentials; intentionally NOT a managed DB.
+      TEST_DATABASE_URL: postgres://postgres:verify@localhost:5432/verify?sslmode=disable
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          # Pin the MAIN module's Go to 1.25 on purpose: the main module stays
+          # go 1.25.0 and we avoid an unrelated version bump. The tools module
+          # (tools/go.mod -> go 1.26) gets its 1.26 toolchain via GOTOOLCHAIN=auto
+          # on the verify step below.
+          go-version: '1.25'
+      - run: bash scripts/verify.sh
+        env:
+          # setup-go v6 (actions/setup-go#460) now exports GOTOOLCHAIN=local via
+          # $GITHUB_ENV, pinning `go` to the installed 1.25 SDK and refusing the
+          # auto-download. That would break the tools-module steps inside verify.sh
+          # (tools/go.mod -> go 1.26; only 1.25 is installed) with
+          # "go.mod requires go >= 1.26 ... GOTOOLCHAIN=local". A STEP-level env is
+          # the highest precedence and beats setup-go's $GITHUB_ENV value (a
+          # job-level env would NOT), so we force auto here: the main module is
+          # still tested on 1.25, while `go tool sqlc/goose` transparently fetches
+          # the go 1.26 toolchain the tools module requires.
+          GOTOOLCHAIN: auto

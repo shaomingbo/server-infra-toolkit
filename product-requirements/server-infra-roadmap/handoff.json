@@ -1,0 +1,111 @@
+{
+  "slug": "server-infra-roadmap",
+  "source_type": "idea",
+  "mode": "L2",
+  "title": "Server-Infra-Toolkit 中期 ROADMAP(对标 app-infra-toolkit,按 ROI 排序)",
+  "summary": "对标客户端基础设施 app-infra-toolkit,为服务端梳理一份按 ROI 排序的中期 ROADMAP(mode L2)。服务端定为独立新 repo server-infra-toolkit(Go + 模块化单体 + Postgres/Neon + Cloud Run)。目标是让明博逐个开 PRD 把模块落地,并在第一站一次性定下轻量目录/CI 约定,避免事后专门起一个迭代补目录/CI。ROADMAP 以 T0 线上最小闭环开头,依次推进数据接入层、auth、契约对账、离线包、事件接收、部署加固,并把运营与商业化能力列为按业务触发的 backlog。",
+  "goal_alignment": {
+    "status": "clear",
+    "target_user": "明博——预备独立开发者,单人开发加 AI 杠杆,熟 Node.js、Go 新手,已为客户端建有 app-infra-toolkit 基础设施。",
+    "problem": "客户端有 app-infra-toolkit 基础设施,服务端是空白;缺一份按 ROI 排序、可逐个开 PRD 落地的服务端基础设施 ROADMAP,且不希望像客户端那样事后专门起一个迭代去补目录与 CI。",
+    "success_outcome": "产出一份按 ROI 排序的服务端基础设施模块 ROADMAP(每项可独立开 PRD 落地),并在第一站一次性定下轻量目录与 CI 约定,后续模块接入不需要专门起迭代梳理目录或 CI。",
+    "scope_boundary": "范围=服务端基础设施套件的中期 ROADMAP(模块清单、ROI 排序、依赖结构、目录与 CI 约定、第一站);非目标=不实现任何模块、不详设每个模块字段(留各自 PRD)、不碰客户端、不做具体业务功能、不在地基期建完整 spec 到 Go 生成器。",
+    "first_acceptance_signal": "ROADMAP 文档列出有序的 T0 到 T6 推进站,第一站 T0 的范围明确到可直接另起一个 PRD session 起草。",
+    "confidence": "high",
+    "alternatives_considered": []
+  },
+  "goals": [
+    "产出一份按 ROI 排序的服务端基础设施模块 ROADMAP,每项可独立开 PRD 落地。",
+    "在第一站一次性定下顶层目录约定与 CI 约定,后续模块接入不重排目录、不需专门起迭代补 CI。",
+    "让服务端与客户端 app-infra-toolkit 通过共享契约配套,把两端漂移挡在测试层。",
+    "明确第一个推进站 T0 及其验收,使明博能立即另起 session 开第一份模块 PRD。"
+  ],
+  "non_goals": [
+    "不在本 session 实现任何服务端模块代码。",
+    "不详细设计每个模块的接口字段(留给各模块自己的 PRD)。",
+    "不修改客户端 app-infra-toolkit。",
+    "不规划具体业务功能(只规划基础设施套件)。",
+    "不在地基期建完整的 spec 到 Go 代码生成器。"
+  ],
+  "assumptions": [
+    {"id": "A1", "text": "中期指大约 3 到 6 个月内可逐步落地的范围;backlog 中的运营与商业化能力超出此窗口,按业务触发。", "confidence": "medium"},
+    {"id": "A2", "text": "客户端 app-infra-toolkit 的服务端对端接口当前为占位(wire 未固化),服务端先按客户端代码线索手写契约,经一次真实业务验证后再冻结。", "confidence": "high"},
+    {"id": "A3", "text": "服务端技术栈沿用前序决策:Go 加模块化单体加 net/http 加 Postgres/Neon 加 pgx 加 sqlc 加 go-playground/validator,部署 Cloud Run 起步、Hetzner+Coolify 备选。", "confidence": "high"},
+    {"id": "A4", "text": "契约通过 git submodule 或发布 spec 包引用客户端 TS spec(独立 repo 下二选一,默认起步用 submodule),具体在 T3 定。", "confidence": "medium"}
+  ],
+  "requirements": [
+    {"id": "FR1", "type": "functional", "priority": "must", "description": "ROADMAP 必须覆盖客户端已定义的 4 个服务端对端:auth 登录与刷新、离线包 manifest 加签名加下载、批量事件接收、错误约定;并为每项标注客户端已固化的数据形态线索(如 token 加 expiresAt、manifest 的 version/digest/keyId/Ed25519、Envelope 模型)。"},
+    {"id": "FR2", "type": "functional", "priority": "must", "description": "ROADMAP 必须包含服务端自身的地基模块(HTTP 服务壳、数据接入层、配置与密钥注入),这些客户端没有对端但服务端必需,不得作为隐含项省略。"},
+    {"id": "FR3", "type": "functional", "priority": "must", "description": "ROADMAP 必须给出按 ROI 排序的推进顺序(T0 到 T6 加 backlog),每项标注价值、成本、依赖,并可逐个开 PRD 落地;排序依据需写明(价值看解锁度、客户端依赖紧迫度、跨业务复用性;成本看实现复杂度、Go 学习曲线、依赖前置)。"},
+    {"id": "FR4", "type": "functional", "priority": "must", "description": "第一个推进站 T0 必须是线上最小闭环:HTTP 服务壳、统一错误约定、服务端自身结构化日志、配置与密钥注入、CI 入口脚本、一次真实部署到 Cloud Run 并连通 Neon 的冒烟验证。"},
+    {"id": "FR5", "type": "functional", "priority": "must", "description": "ROADMAP 必须定义一套顶层目录约定与 CI 约定(单一入口脚本、首版只校验增量),在 T0 一次落定,后续模块接入不改顶层目录布局。"},
+    {"id": "FR6", "type": "functional", "priority": "should", "description": "契约配套(TS spec 到 Go 类型)必须采用 fixture 先行、完整生成器后置的路径:auth 对端走通并固化前用手写 DTO 加 golden fixture,不在地基期建完整 codegen 生成器。"},
+    {"id": "FR7", "type": "functional", "priority": "should", "description": "ROADMAP 必须把超出当前对标范围的能力(后台与定时任务、Admin/Ops、权限与租户与计费)列为 deferred backlog,标注由哪类业务需求触发,不进 T0 到 T6 主线。"},
+    {"id": "NFR1", "type": "non_functional", "priority": "must", "description": "所有模块不依赖常驻进程(Cloud Run 缩到零),异步与定时任务用外部触发(Cloud Scheduler 或 Cloud Tasks);该约束在 T0 即作为前置声明,贯穿后续模块。"},
+    {"id": "NFR2", "type": "non_functional", "priority": "must", "description": "密钥与令牌生命周期:refresh token 以哈希形式存储且支持撤销;签名私钥放托管密钥服务(Secret Manager),不放环境变量明文;离线包签名密钥同此规则。"},
+    {"id": "NFR3", "type": "non_functional", "priority": "must", "description": "数据库 schema 变更必须有版本化迁移且可回滚,迁移在缩到零环境下的触发方式明确(谁触发、何时跑)。"},
+    {"id": "NFR4", "type": "non_functional", "priority": "must", "description": "服务端自身可观测性(每请求 request id、结构化日志、错误码、时延、部署版本)在 T0 就位,与接收客户端事件的对端模块(T5)区分开,不混为一谈。"},
+    {"id": "NFR5", "type": "non_functional", "priority": "should", "description": "auth、事件上报、离线包下载三类入口必须有防滥用限流或配额,避免单个客户端 bug 把账单与数据库写入打爆。"},
+    {"id": "NFR6", "type": "non_functional", "priority": "must", "description": "对端契约先标 unstable(手写加 golden fixture),经一次真实客户端消费验证后才标 frozen(此后不破坏兼容);采用制品 semver 与契约 semver 双版本轴。"},
+    {"id": "NFR7", "type": "non_functional", "priority": "should", "description": "每个推进站对应的 PRD 可独立验收、独立回滚、独立合并(PRD 粒度上限),不允许出现必须整体完成才能验收的大颗粒 PRD。"},
+    {"id": "NFR8", "type": "non_functional", "priority": "must", "description": "服务端为独立 repo(server-infra-toolkit),Go/Linux CI 与客户端 macOS/Xcode CI 隔离;契约通过 git submodule 或发布 spec 包引用客户端 spec,CI 约定不含 macOS 或 Xcode 步骤。"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC1", "description": "ROADMAP 文档列出的每个服务端模块,逐条能映射到客户端 4 个对端之一或服务端地基(HTTP 服务壳、数据接入层、配置与密钥)之一;不存在无归属的模块。", "verifiable_by": "code_review", "requirement_refs": ["FR1", "FR2"]},
+    {"id": "AC2", "description": "ROADMAP 给出 T0 到 T6 的有序推进列表,每项含价值、成本、依赖三栏;后续任一项的依赖只指向序号更靠前的项,不存在循环依赖。", "verifiable_by": "code_review", "requirement_refs": ["FR3"]},
+    {"id": "AC3", "description": "ROADMAP 标注的第一个推进站 T0 的范围同时包含 HTTP 服务壳、统一错误响应、服务端结构化日志、配置与密钥注入、CI 入口脚本、一次部署到 Cloud Run 并连通 Neon 的冒烟验证共 6 项,缺一不可。", "verifiable_by": "code_review", "requirement_refs": ["FR4", "NFR4"]},
+    {"id": "AC4", "description": "ROADMAP 给出一份顶层目录树与一个 CI 入口脚本约定,并声明新增后续模块不改动顶层目录树;后续模块 PRD 的验收包含顶层目录树 git diff 为空这一检查项。", "verifiable_by": "code_review", "requirement_refs": ["FR5"]},
+    {"id": "AC5", "description": "ROADMAP 的契约配套条目写明 auth 对端固化前用手写 DTO 加 golden fixture、完整 spec 到 Go 生成器排在 auth 之后;不存在在 T0 或 T1 建完整代码生成器的安排。", "verifiable_by": "code_review", "requirement_refs": ["FR6"]},
+    {"id": "AC6", "description": "ROADMAP 把后台与定时任务、Admin/Ops、权限与租户与计费三类列入 deferred backlog 区,每项标注触发条件;这三类不出现在 T0 到 T6 主线。", "verifiable_by": "code_review", "requirement_refs": ["FR7"]},
+    {"id": "AC7", "description": "ROADMAP 的横切约束章节逐条列出无常驻进程、密钥与令牌生命周期、迁移可回滚、服务端自身可观测性、入口限流、契约冻结纪律、PRD 粒度上限共 7 条,每条标注它约束哪些推进站。", "verifiable_by": "code_review", "requirement_refs": ["NFR1", "NFR2", "NFR3", "NFR4", "NFR5", "NFR6", "NFR7"]},
+    {"id": "AC8", "description": "handoff.json 的 tasks 给出 T0 到 T6 的依赖关系,每个 task 的 done_when 至少引用一条本文档定义的验收标准,next_prompt 指向 T0 的 PRD 起草;validate_handoff.py 校验通过。", "verifiable_by": "automated_test", "requirement_refs": ["FR3"]},
+    {"id": "AC9", "description": "ROADMAP 声明服务端为独立 repo,写明契约引用客户端 spec 的方式为 git submodule 或发布 spec 包二选一作为默认;CI 约定不含 macOS 或 Xcode 相关步骤。", "verifiable_by": "code_review", "requirement_refs": ["NFR8"]}
+  ],
+  "edge_cases": [
+    {"id": "E1", "description": "客户端占位接口在服务端开发期间反向变更字段。", "expected_behavior": "对端契约处于 unstable 阶段,用 golden fixture 吸收变更;未冻结前不计为破坏兼容,服务端跟随调整。"},
+    {"id": "E2", "description": "Cloud Run 实例与 Neon 同时缩到零,首请求触发双重冷启动。", "expected_behavior": "连接池配置在 T1 验收时覆盖冷启动场景,首请求经重试后返回正常响应,不向客户端抛连接错误。"},
+    {"id": "E3", "description": "某推进站 PRD 落地后发现需要一个未排序的支撑能力。", "expected_behavior": "在该站 PRD 内就近处理最小必要支撑,不擅自提升为独立 ROADMAP 站,保持主线顺序不变。"},
+    {"id": "E4", "description": "离线包签名密钥需要轮换,但已发布的客户端只认旧 keyId。", "expected_behavior": "T4 的 manifest 契约预留多 keyId 并存窗口与信任链,实现可先支持单 key,但契约不阻断后续轮换。"},
+    {"id": "E5", "description": "客户端事件上报因 bug 风暴式发送。", "expected_behavior": "T5 事件入口有限流或配额,单位时间超限时丢弃或降级,数据库写入与账单不被打爆。"}
+  ],
+  "risks": [
+    {"id": "R1", "description": "Go 新手在早期高杠杆环节(部署链、连接池、签名)判断不足,AI 生成的 Go 代码难以严格自审。", "impact": "high", "likelihood": "medium", "mitigation": "推进顺序把最大未知(部署链加 Go 上手)前置到 T0 最小闭环消化;签名、连接池等硬骨头各自独立 PRD 加 golden fixture 加异源 review。", "owner": "Mingbo"},
+    {"id": "R2", "description": "契约过早冻结,把未验证的错误设计固化进不可破坏兼容的契约。", "impact": "medium", "likelihood": "medium", "mitigation": "对端契约先 unstable,经一次真实客户端消费验证后才冻结(NFR6)。", "owner": "engineering"},
+    {"id": "R3", "description": "目录或 CI 约定在信息不全时定死,后续撞硬编码路径(重蹈客户端 toolchain-cleanup)。", "impact": "medium", "likelihood": "low", "mitigation": "T0 只冻结顶层目录契约(哪层放什么),模块内布局自治;独立新 repo 从零定布局,风险低于客户端的多构建系统并存。", "owner": "engineering"},
+    {"id": "R4", "description": "平台化过早(后台、Admin、权限、计费)拖垮单人开发节奏。", "impact": "medium", "likelihood": "medium", "mitigation": "这几类列 deferred backlog,由业务触发再做(FR7)。", "owner": "Mingbo"},
+    {"id": "R5", "description": "Cloud Run 缩零与 Neon 缩零的双冷启动导致首请求超时或连接风暴。", "impact": "medium", "likelihood": "medium", "mitigation": "T1 连接池配置覆盖冷启动场景;T0 冒烟即验证一次真实冷启动路径。", "owner": "engineering"},
+    {"id": "R6", "description": "密钥与令牌生命周期处理草率(token 明文入库、私钥进 env)造成安全债。", "impact": "high", "likelihood": "medium", "mitigation": "NFR2 规定 refresh token 哈希存储加撤销、私钥进 Secret Manager;T2 与 T4 验收强制覆盖。", "owner": "engineering"}
+  ],
+  "default_decisions": [
+    {"id": "D1", "decision": "中期范围锁定为聚焦 T0 到 T6 主线(约 3 到 6 个月),运营与商业化能力列 deferred backlog。", "reason": "输入未指定时间上界,按独立开发者单人节奏取最合理窗口。", "override_if": "明博指定更长的中期窗口,或要求 backlog 项进主线。"},
+    {"id": "D2", "decision": "服务端定为独立新 repo(server-infra-toolkit),CI 与客户端隔离,契约靠 submodule 或发包引用客户端 spec。", "reason": "明博在本次目标对齐阶段明确选择了独立新 repo。", "override_if": "明博改选 monorepo 或其它安放方式,则重排目录、CI 与契约章节。"},
+    {"id": "D3", "decision": "第一个推进站 T0 设为线上最小闭环(含一次真实 Cloud Run 加 Neon 冒烟),而非先做某个客户端对端。", "reason": "五路批判共识:Go 新手最大未知在部署链,且错误约定与对端需要 server 壳承载。", "override_if": "明博已有可复用的 Go 服务端骨架,则 T0 可缩减。"},
+    {"id": "D4", "decision": "契约配套采用 fixture 先行、完整 codegen 生成器后置,生成器排在 auth 对端固化之后。", "reason": "codegen 现状只支持两种 unit kind,新增 Go DTO 生成是非零工程量;Go 新手先写生成器顺序颠倒。", "override_if": "明博希望尽早投入 codegen 自动化。"},
+    {"id": "D5", "decision": "两个实现层疑问(客户端是否已在攒事件、Envelope 的 TS spec 是否已成形)按客户端对端为占位、spec 尚未落成 TS 处理,服务端 ROADMAP 不依赖客户端先动。", "reason": "实现层细节走 default,不打断明博;不影响 ROADMAP 排序。", "override_if": "客户端实际已有可用 spec 或已在攒事件,则 T5 与 T3 紧迫度上调。"}
+  ],
+  "open_questions": [
+    {"id": "Q1", "question": "契约与客户端 spec 的共享方式最终用 git submodule 还是发布 spec 包?", "why_mingbo_owned": "这取决于明博如何治理两个 repo 的版本联动与发布节奏(是否愿意维护一条 spec 发布管道),属于 repo 间依赖治理的个人运维偏好,协调者无法替他定。", "recommended_default": "起步用 git submodule(零发布管道),待 spec 变更频率升高再切换为发布 spec 包;此项在 T3 契约对账站正式定。"}
+  ],
+  "tasks": [
+    {"id": "T0", "description": "ROADMAP 站 T0 线上最小闭环:另起 PRD 并落地 HTTP 服务壳、统一错误约定、服务端结构化日志、配置与密钥注入、CI 入口脚本、一次真实 Cloud Run 加 Neon 部署冒烟;同时一次落定顶层目录树与 CI 约定。", "owner_agent": "main_coordinator", "deps": [], "done_when": ["AC3", "AC4"]},
+    {"id": "T1", "description": "ROADMAP 站 T1 数据接入层:pgx 连接池、sqlc 工作流、版本化迁移规范、连接池对 Cloud Run 加 Neon 双缩零的适配;CI 加入 sqlc 无漂移与 migration 可跑两条 gate。", "owner_agent": "main_coordinator", "deps": ["T0"], "done_when": ["AC1", "AC7"]},
+    {"id": "T2", "description": "ROADMAP 站 T2 auth 登录与刷新:第一个真实对端,手写 DTO 加 golden fixture,落实 refresh token 哈希存储加撤销、签名私钥进 Secret Manager;走通并经客户端消费后把 auth 契约标 frozen。", "owner_agent": "main_coordinator", "deps": ["T0", "T1"], "done_when": ["AC1", "AC7"]},
+    {"id": "T3", "description": "ROADMAP 站 T3 契约对账:契约 fixture 先行加最小 spec 到 Go DTO 对账机制(防两端漂移),用 auth 已验证的 DTO 当样板;在此站定 submodule 还是发包(见 Q1)。不做完整生成器。", "owner_agent": "main_coordinator", "deps": ["T2"], "done_when": ["AC5"]},
+    {"id": "T4", "description": "ROADMAP 站 T4 offline-package:manifest(version/digest/keyId/Ed25519 签名/minAppVersion)加包下载,manifest 契约预留多 keyId 轮换窗口与信任链(实现可先单 key)。", "owner_agent": "main_coordinator", "deps": ["T0", "T1", "T2"], "done_when": ["AC1", "AC7"]},
+    {"id": "T5", "description": "ROADMAP 站 T5 observability 事件接收:批量 Envelope 接收端点加落库,带限流/配额/幂等/保留周期;与 T0 的服务端自身可观测性区分开。", "owner_agent": "main_coordinator", "deps": ["T0", "T1", "T2"], "done_when": ["AC1", "AC7"]},
+    {"id": "T6", "description": "ROADMAP 站 T6 部署加固与多环境:完善健康检查、优雅关闭、成本告警、local/preview/prod 多环境配置与回调地址;补全 T0 冒烟之外的运行时基线。", "owner_agent": "main_coordinator", "deps": ["T0"], "done_when": ["AC3", "AC7"]},
+    {"id": "T7", "description": "Backlog 站 T7 后台与定时任务基础设施:在 Cloud Run 缩零下用 Cloud Scheduler 或 Cloud Tasks 跑 token 清理、包处理、事件压缩等;由业务触发再启动 PRD。", "owner_agent": "main_coordinator", "deps": ["T0", "T1"], "done_when": ["AC6", "AC7"]},
+    {"id": "T8", "description": "Backlog 站 T8 运营与商业化能力:Admin/Ops 管理面、权限与租户、计费权益;明确为 deferred、由具体商业模式触发,避免过早平台化。", "owner_agent": "main_coordinator", "deps": ["T2"], "done_when": ["AC6"]}
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/server-infra-roadmap/prd.md",
+    "handoff": "product-requirements/server-infra-roadmap/handoff.json"
+  },
+  "next_prompt": "另起 session 执行:/design-gate-lite 为 server-infra-toolkit 的 T0 线上最小闭环起草可落地 PRD(范围:HTTP 服务壳加统一错误约定加服务端结构化日志加配置与密钥注入加 CI 入口脚本加一次 Cloud Run/Neon 部署冒烟,并一次落定顶层目录树与 CI 约定);输入参考本 ROADMAP 的 T0 条目、横切约束 NFR1 到 NFR8、目录与 CI 约定一节。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": ["codebase-scan", "option-conservative", "option-fast", "option-longterm", "architecture", "implementation", "requirement", "redteam"],
+    "codex_used": true,
+    "codex_downgraded": false
+  }
+}

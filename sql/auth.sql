@@ -1,0 +1,170 @@
+-- T2 auth 基础 query(地基)。覆盖 T2-T7 用得到的读写 + 演示事务接缝(refresh 轮换
+-- 把 MarkRefreshTokenUsed + InsertRefreshToken + InsertAccessToken 放进一个事务)。
+-- 业务逻辑(哈希、token 生成、轮换判定)在 Go 侧填,这里只是类型安全的 SQL 出入口。
+-- 查询的表由 db/migrations/00002_auth.sql 建出(schema 单一真相源)。
+
+-- name: CreateUser :one
+INSERT INTO users (username, password_hash)
+VALUES ($1, $2)
+RETURNING id, username, password_hash, status, failed_attempts, locked_until, created_at, updated_at;
+
+-- name: GetUserByUsername :one
+-- 大小写不敏感按 lower(username) 命中 users_username_lower_key 唯一索引。
+-- 额外返回 now()::timestamptz AS db_now:登录侧的账户锁定判定必须在单一 DB 时钟域内
+-- 比较 locked_until(由 SQL now() 写入,见 RecordLoginFailure)。混 app time.Now() 会因
+-- DB↔app skew 导致锁定提前解除或永不解除(W2d D5,沿用 refresh 的 db_now 范式)。
+SELECT id, username, password_hash, status, failed_attempts, locked_until, created_at, updated_at,
+       now()::timestamptz AS db_now
+FROM users
+WHERE lower(username) = lower($1);
+
+-- name: GetUserByID :one
+SELECT id, username, password_hash, status, failed_attempts, locked_until, created_at, updated_at
+FROM users
+WHERE id = $1;
+
+-- name: SetUserLock :exec
+-- 失败计数 + 锁定窗口的整值覆写口。W2d 后仅保留给「登录成功幂等清零」一条路径
+-- (failed_attempts=0, locked_until=NULL):整值覆写在这里安全,因为成功登录不是并发竞争点
+-- (攻击者无正确密码,FR3/D2/D6)。失败累加绝不走这里——读-改-写在多实例并发下丢计数,
+-- 失败路径必须走 RecordLoginFailure 的 DB 侧单语句原子自增(D2)。
+UPDATE users
+SET failed_attempts = $2,
+    locked_until    = $3,
+    updated_at      = now()
+WHERE id = $1;
+
+-- name: TouchUserTiming :exec
+-- 反枚举时序对齐(W2d BLOCKER1):四条登录失败路径必须做等价成本的 DB 写,否则
+-- 「wrong-password=有写、no-user/locked/disabled=无写」的响应时序差会泄露用户名是否存在。
+-- 这是一次主键 UPDATE,与 RecordLoginFailure(wrong-pw 路径)/SetUserLock(success 路径)
+-- 同量级成本,用于 no-user/locked/disabled 三路把缺失的那次 DB 写补齐。
+-- no-user 路径传零值 UUID,匹配 0 行(无此用户可写),但 SQL 解析/规划/事务开销与匹配 1 行
+-- 路径同源(WAL 残差被前置 argon2 数十毫秒量级吸收,见 W2d walEquivalence 实测)。
+UPDATE users
+SET updated_at = now()
+WHERE id = sqlc.arg(id);
+
+-- name: RecordLoginFailure :one
+-- 登录失败的 DB 侧原子计数(W2d D2/D6/FR1 + MAJOR1/MAJOR2 守锁修复):单条 CTE 语句完成
+-- 「自增 / 过期重计 / 置锁 / 守锁不重置」全部状态转移,无 Go 侧读-改-写。在 READ COMMITTED 下,
+-- CTE 的 FOR UPDATE 对目标行加行锁把并发执行串行化;后到的请求等前者提交后,FOR UPDATE 触发
+-- EvalPlanQual 对该行重读最新已提交版本(old 拿到上一个请求提交后的真实旧值,即「已锁」),
+-- 故跨实例并发计数无丢失、无重复重置(禁先 SELECT 后 UPDATE 两段式 TOCTOU,也禁 UPDATE...FROM
+-- users 自连接——后者的 old 不参与 EvalPlanQual、读陈旧快照会丢计数,见下)。所有时间判定用
+-- SQL now()(DB 时钟域,与 GetUserByUsername 的 db_now 同源,D5)。
+--
+-- old 是更新前的行值:用 CTE `SELECT ... FOR UPDATE` 先对目标行加行锁并拿其旧 failed_attempts
+-- / locked_until,再 UPDATE 引用 old.* 完成状态转移。
+--
+-- 【为何用 CTE+FOR UPDATE 而非 UPDATE...FROM users 自连接】实测(W2d concerns 有数据):在
+-- READ COMMITTED 下,`UPDATE u ... FROM users AS old` 的 old 是一次独立的关系扫描,用语句开始
+-- 时的快照、且【不参与 EvalPlanQual 重读】——并发请求等行锁后,被更新行 u 会重读最新已提交值,
+-- 但 old 仍读到陈旧的旧值,导致 old.failed_attempts 永远停在并发前的值 → 严重丢计数(12 并发
+-- 实测只数到 2,失败更新)。CTE 里的 `FOR UPDATE` 锁行会触发 EvalPlanQual 对该行重读最新已提交
+-- 版本,old 拿到的是真正的「本次 UPDATE 前、上一个已提交请求后」的值,故守锁/计数/just_locked
+-- 全部正确;并发 12 实测 failed_attempts 恰好停在阈值、无丢失。这与 refresh 的
+-- GetRefreshTokenBySelectorForUpdate(FOR UPDATE 取行 + 同事务内判定)是同一并发范式。
+--
+-- failed_attempts = CASE:① 已锁(old.locked_until > now())→ 保持 old.failed_attempts
+-- (守边界,MAJOR1:跨阈值并发时后到请求不再续增、不再重置锁窗);② 过期(old.locked_until
+-- <= now())→ 从 1 重计(D6:锁窗过期后下次失败计数从 1 起,避免单调累积误锁);③ 未锁 →
+-- old.failed_attempts + 1。
+--
+-- locked_until = CASE:① 已锁 → 保持 old.locked_until(不重置,MAJOR1);② 新计数达阈值 →
+-- now()+窗口(置锁);③ 否则 NULL(未锁未达阈值,或过期重计后未达阈值,顺手清掉陈旧锁)。
+--
+-- just_locked = 「旧未锁/旧过期」AND「新锁定」:仅本次失败把账户从未锁推到锁定时为 true,
+-- 供 Go 侧只在 just_locked 时打一条 account_locked 事件(恰好一次,MAJOR2);并发后到请求走
+-- 「已锁保持」分支,old.locked_until 已是未来 → just_locked=false,不重复打事件。
+-- threshold = 阈值 N,lockout_window = 锁定窗口(interval,Go 侧以 OWASP 参数传入,非魔数)。
+WITH old AS (
+    SELECT users.id, users.failed_attempts, users.locked_until
+    FROM users
+    WHERE users.id = sqlc.arg(id)
+    FOR UPDATE
+)
+UPDATE users AS u
+SET failed_attempts = CASE
+        WHEN old.locked_until IS NOT NULL AND old.locked_until > now() THEN old.failed_attempts
+        WHEN old.locked_until IS NOT NULL AND old.locked_until <= now() THEN 1
+        ELSE old.failed_attempts + 1
+    END,
+    locked_until = CASE
+        WHEN old.locked_until IS NOT NULL AND old.locked_until > now() THEN old.locked_until
+        WHEN (CASE
+                  WHEN old.locked_until IS NOT NULL AND old.locked_until <= now() THEN 1
+                  ELSE old.failed_attempts + 1
+              END) >= sqlc.arg(threshold)::int
+            THEN now() + sqlc.arg(lockout_window)::interval
+        ELSE NULL
+    END,
+    updated_at = now()
+FROM old
+WHERE u.id = old.id
+RETURNING u.failed_attempts, u.locked_until,
+    -- ::boolean cast 让 sqlc 推断为非 nullable bool(表达式两端均为 IS [NOT] NULL 谓词,
+    -- 永不为 SQL NULL,cast 不改语义),Go 侧得以直接 if res.JustLocked(W2d sqlc 类型修正)。
+    (((old.locked_until IS NULL OR old.locked_until <= now()) AND u.locked_until IS NOT NULL))::boolean AS just_locked;
+
+-- name: InsertRefreshToken :one
+INSERT INTO refresh_tokens (user_id, selector, verifier_hash, token_family, expires_at)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, user_id, selector, verifier_hash, token_family, expires_at, revoked_at, used_at, created_at;
+
+-- name: GetRefreshTokenBySelector :one
+SELECT id, user_id, selector, verifier_hash, token_family, expires_at, revoked_at, used_at, created_at
+FROM refresh_tokens
+WHERE selector = $1;
+
+-- name: GetRefreshTokenBySelectorForUpdate :one
+-- 轮换时按 selector 取行并加 FOR UPDATE 行锁:把同一 token 的并发刷新串行化,
+-- 防并发双花(AC6)。第二个并发请求阻塞到第一个事务提交后才读到 used_at 已置的行。
+-- 额外返回 now()::timestamptz AS db_now:与被锁行在同一事务、同一语句快照里取 DB 当前
+-- 时间,供宽限窗判定在同一个 DB 时钟域内比较(used_at 由 SQL now() 写入,差值若混 app
+-- 时钟会因 DB↔app skew 误判并发 loser 为 replay,误撤 family)。
+SELECT id, user_id, selector, verifier_hash, token_family, expires_at, revoked_at, used_at, created_at,
+       now()::timestamptz AS db_now
+FROM refresh_tokens
+WHERE selector = $1
+FOR UPDATE;
+
+-- name: LockTokenFamily :exec
+-- 对整个 token_family 加事务级 advisory 锁(pg_advisory_xact_lock),把同一 family 的
+-- 所有 rotateRefresh 串行化。必须在任何 FOR UPDATE 行锁之前调用:advisory 锁是单一
+-- 锁、且先于行锁获取,故无锁顺序环、不会与并发重放的 RevokeTokenFamily 死锁。
+-- 串行化后,「重放(撤 family)」与「轮换(插新行)」不再交错——要么重放先撤、随后轮换
+-- FOR UPDATE 读到已 revoked 行而拒绝,要么轮换先插并提交、随后重放撤 family 时已能看到
+-- 新行而一并撤掉(修复并发下新行逃过撤销的缺陷 + 同 family 双重放互锁的死锁)。
+-- key 用 hashtextextended(token_family::text, 0) 把 UUID 映射到 advisory 锁的 bigint 空间。
+-- $1::uuid 让 sqlc 把参数推断为 pgtype.UUID(与 row.TokenFamily 同型),再 ::text 供哈希。
+SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 0));
+
+-- name: MarkRefreshTokenUsed :exec
+-- 轮换时把旧 token 标记为已用(used_at),用于重放检测(已用 token 再次出现 → 撤销 family)。
+UPDATE refresh_tokens
+SET used_at = now()
+WHERE id = $1;
+
+-- name: RevokeTokenFamily :exec
+-- 检测到重放时撤销整个 family 链上所有未撤销的 refresh token。
+UPDATE refresh_tokens
+SET revoked_at = now()
+WHERE token_family = $1
+  AND revoked_at IS NULL;
+
+-- name: InsertAccessToken :one
+INSERT INTO access_tokens (user_id, token_hash, expires_at)
+VALUES ($1, $2, $3)
+RETURNING id, user_id, token_hash, expires_at, revoked_at, created_at;
+
+-- name: GetAccessToken :one
+-- Bearer 验证按 token 的 SHA-256 查找(后续 task 用)。
+SELECT id, user_id, token_hash, expires_at, revoked_at, created_at
+FROM access_tokens
+WHERE token_hash = $1;
+
+-- name: RevokeAccessToken :exec
+UPDATE access_tokens
+SET revoked_at = now()
+WHERE id = $1;

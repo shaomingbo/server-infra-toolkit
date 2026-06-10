@@ -1,0 +1,160 @@
+{
+  "slug": "t1-data-access",
+  "source_type": "execution_plan",
+  "mode": "L1",
+  "title": "T1 数据接入层",
+  "summary": "为 server-infra-toolkit 第二推进站 T1 数据接入层起草可落地 PRD。在 T0 线上最小闭环之上建服务端第一个有状态地基:pgxpool 连接池(替换运行时裸连接、保留 -smoke)、sqlc schema-first 工作流、版本化可回滚迁移规范、双缩零(Cloud Run 实例缩零 + Neon 计算缩零)连接池适配、CI 增量 gate。明博已确认范围=纯 T1,T0 部署冒烟+CI绿作为动手前置。",
+  "goal_alignment": {
+    "status": "selected",
+    "target_user": "明博——server-infra-toolkit 的规划者+唯一实现者(熟 Node.js、Go 新手,单人+AI 杠杆);次要消费者=T1 落地的 implementer/reviewer 与首个数据层消费者 T2 auth",
+    "problem": "ROADMAP 下一站 T1 数据接入层只有一行表格,需展开成可落地 PRD;同时 codebase-scan 发现 T0 部署冒烟+CI真跑绿尚无执行痕迹,需明确它与 T1 的依赖(T1 双缩零适配验收依赖真实线上环境)",
+    "success_outcome": "T1 有一份可另起 session 直接落地的 PRD(pgxpool 连接池+sqlc+可回滚迁移规范+双缩零适配+CI 增量 gate),后续有状态模块(首个=T2 auth)能 import internal/platform/db 经窄接口拿到配置正确、缩零下能自愈重连的连接池并用 sqlc 类型安全函数查库;T0 部署冒烟+CI绿作为动手前置(待完成,不在本 PRD 实现)",
+    "scope_boundary": "范围=纯 T1 数据接入层单站 PRD;不做 T0 部署收尾、不实现业务表、不碰客户端、不改 T0 顶层目录第一层",
+    "first_acceptance_signal": "基础设施自验载体经连接池跑通'迁移建表→sqlc 生成 query→连接池执行→返回预期结果'整链(AC8),且 handoff 校验通过",
+    "confidence": "high",
+    "alternatives_considered": [
+      {
+        "id": "GA1",
+        "target_user": "明博(规划+实现)",
+        "success_outcome": "锻造纯 T1 数据接入层 PRD,T0 部署冒烟+CI绿作为 T1 动手前置(标待完成)",
+        "scope_sentence": "锻造纯 T1 PRD;不在本 PRD 做 T0 部署收尾",
+        "p0_conflict": "下一站对象=T1 而非先收 T0",
+        "if_wrong_wasted_work": "若其实该先收 T0,则 T1 的双缩零 AC 无真实线上环境可验,白做"
+      },
+      {
+        "id": "GA2",
+        "target_user": "明博(规划+实现)",
+        "success_outcome": "锻造纯 T1 PRD,T0 部署当已完整(其实已真部署过+CI绿过,只是没留 commit 痕迹),前置标已就绪",
+        "scope_sentence": "锻造纯 T1 PRD;T0 当完整",
+        "p0_conflict": "T0 第5、6 项(CI 真跑绿/真实部署冒烟)是否已执行过",
+        "if_wrong_wasted_work": "若 T0 其实没部署,T1 双缩零 AC 标'已就绪'会误导,实际无环境可验"
+      },
+      {
+        "id": "GA3",
+        "target_user": "明博(规划+实现)",
+        "success_outcome": "下一站 PRD=先把 T0 线上闭环收口(真实部署冒烟+CI绿+留痕),T1 往后排一站",
+        "scope_sentence": "锻造 T0 收尾 PRD;T1 后排",
+        "p0_conflict": "下一站对象=T0 收尾 vs T1 开新",
+        "if_wrong_wasted_work": "若明博其实想直接开 T1,则花在 T0 收尾 PRD 上的功夫错位"
+      }
+    ]
+  },
+  "goals": [
+    "G1: 服务端获得配置正确、缩零下能自愈重连的 pgxpool 连接池,替换 T0 运行时裸连接,经窄接口供后续模块(首个=T2 auth)消费,T2+ 不再各自管连接生命周期",
+    "G2: 建立 sqlc schema-first 工作流,写 SQL 即得类型安全 Go 查询代码、编译期捕获列名/类型错配,免手写易错的 rows.Scan 样板",
+    "G3: 建立版本化、可回滚(含数据安全边界)的迁移规范+目录布局,作为 T2+ schema 演进地基,变更有据可查、可控撤销",
+    "G4: 连接池在双缩零下首请求经有限重试返回成功响应,不抛连接错误、不连接风暴,缩零省成本同时不牺牲首请求可用性",
+    "G5: CI 增量加 sqlc 无漂移+migration 可跑 gate(只对已落地生效、不空跑),schema 与生成代码的不一致在合并前被拦"
+  ],
+  "non_goals": [
+    "NG1: 不实现业务域表/查询(auth→T2/offline→T4/observability→T5);仅建数据接入能力本身+一张基础设施自验载体(非业务表)",
+    "NG2: 不碰客户端 app-infra-toolkit",
+    "NG3: 不改 T0 已落地的顶层目录第一层(cmd/、internal/ 现有子目录);新建 ROADMAP 已冻结画出的 db/migrations/、sql/ 不算违反,sqlc 生成物落 internal/platform/db/ 子树",
+    "NG4: 不给 /livez 加 DB 探测/ping(继承 T0 AC11;Neon 缩零下探 DB 会挂健康检查)",
+    "NG5: 不做 ORM(坚持 pgx+sqlc 显式 SQL)",
+    "NG6: 不做契约层 spec→Go DTO 生成器(属 T3);sqlc 是 SQL→Go 查询代码生成器,与 T3 不同物,在范围内",
+    "NG7: 不在服务进程启动路径自动跑迁移(Cloud Run 缩零并发多实例会竞争+阻塞首请求);迁移与服务进程解耦",
+    "NG8: 不通过 keep-alive/连接预热对抗缩零(会阻止 Neon 计算缩零、增加账单);冷启动靠首请求重连吸收",
+    "NG9: 不做连接 draining/in-flight 查询排空编排/readiness 探针(属 T6);T1 关池=HTTP Shutdown 后 pool.Close() 最小接入"
+  ],
+  "assumptions": [
+    {"id": "A1", "text": "T0 部署冒烟+CI真runner跑绿作为 T1 动手前置(明博范围选择确认);T1 锻造不被阻塞,但双缩零线上验收 defer 到 T0 部署链通后", "confidence": "high"},
+    {"id": "A2", "text": "sqlc 支持 pgx/v5 代码生成(sql_package: pgx/v5)且与已锁 v5.10.0 兼容——实现时核实当前文档", "confidence": "medium"},
+    {"id": "A3", "text": "Go 1.25 支持 go tool 机制锁工具版本(go.mod tool 指令)——实现时核实;不支持则回退 tools.go + go run", "confidence": "medium"},
+    {"id": "A4", "text": "Postgres/Neon 支持事务内 DDL,使单个迁移半途失败可原子回退——Postgres 原生支持事务 DDL", "confidence": "high"}
+  ],
+  "requirements": [
+    {"id": "FR1", "type": "functional", "priority": "must", "description": "用 pgxpool 在 internal/platform/db 建连接池替换服务运行时(HTTP 壳路径)连接获取;保留 T0 的 -smoke 子命令及 db.Smoke 一次性裸连接不变(部署冒烟基础设施,never break userspace);两条路径代码注释区分用途"},
+    {"id": "FR2", "type": "functional", "priority": "must", "description": "连接池参数(pool_max_conns/pool_min_conns/pool_max_conn_lifetime/pool_max_conn_idle_time/pool_health_check_period 等,确切名实现时核实 pgxpool 文档)经 NEON_DSN 的 query string 注入(pgxpool ParseConfig 原生解析),不新开 env 面、不破 T0 Config 三字段;DSN 仍为 config.Secret;未指定参数取缩零友好默认值"},
+    {"id": "FR3", "type": "functional", "priority": "must", "description": "db 包对外只导出最小窄接口(对齐 sqlc DBTX:Exec/Query/QueryRow,预留事务入口 Begin 供 T2);*pgxpool.Pool 具体类型不进 internal/modules/* 构造签名,只在 db 包内部与 main.go 出现;连接池所有权归 main.go,上层注入消费"},
+    {"id": "FR4", "type": "functional", "priority": "must", "description": "pool_max_conns 有显式保守默认值,远小于 Neon 套餐连接上限(防缩零唤醒并发建连打爆 Neon);PRD/代码给出查 Neon 当前套餐上限步骤,默认值×预期最大 Cloud Run 实例数 ≤ 上限"},
+    {"id": "FR5", "type": "functional", "priority": "must", "description": "sqlc 工作流:sqlc.yaml 的 schema 路径指向迁移文件目录(单一真相源)+sql/ 源查询+生成代码落 internal/platform/db/gen/(带 sqlc 生成标记);sqlc 版本经 Go 1.25 go tool 机制锁定(实现时核实,不支持回退 tools.go),verify.sh 用 go tool sqlc 而非全局安装;sql_package 指向 pgx/v5 与已锁 v5.10.0 兼容(实现时核实)"},
+    {"id": "FR6", "type": "functional", "priority": "must", "description": "迁移规范:选定迁移工具(默认 golang-migrate,见 Q1)+db/migrations/ 布局+命名+up/down;每个迁移在事务内执行(Postgres 事务 DDL)保半途失败可原子回退,写明所选工具 dirty 恢复步骤;down 适用边界明确(本地/未发布撤销 vs 生产前滚修复);破坏性 down(DROP)须标 IRREVERSIBLE 且不入常规回滚流程"},
+    {"id": "FR7", "type": "functional", "priority": "must", "description": "定义基础设施自验载体打通'迁移建 schema→sqlc 消费→连接池执行'整链——复用迁移工具版本表(如 schema_migrations)或一张标注非业务的自检表,配一条 sqlc query 经连接池执行返回预期结果;不违反 NG1;禁用 SELECT 1/系统目录 query 替代(那切断迁移→sqlc 验证闭环)"},
+    {"id": "FR8", "type": "functional", "priority": "should", "description": "迁移触发与服务进程解耦:T1 交付触发机制设计(部署前独立步骤/手动命令,嵌入 DEPLOY.md 部署流程之前)+在本地与 CI dockerized Postgres 可跑;真实线上实跑验证 defer 到 T0 部署链通后;服务镜像不承担 schema 演进职责;迁移凭据复用 NEON_DSN 经受控 secret 注入"},
+    {"id": "FR9", "type": "functional", "priority": "must", "description": "连接池生命周期接入 main.go:启动 lazy 连接(不在启动路径阻塞等 DB 醒来);SIGTERM 时在 srv.Shutdown(ctx) 返回之后才 pool.Close()(先排空在途再关池);总时长受 Cloud Run SIGTERM grace 约束(具体值实现时核实)"},
+    {"id": "FR10", "type": "functional", "priority": "must", "description": "双缩零首请求经有限重试返回成功响应:冷启动重连靠 pgxpool 连接获取层+连接超时,业务路径瞬时故障最多一次有界重试+短退避(封装 db 包内、不暴露接口签名、不下沉业务 handler);重试逻辑不在 livez/启动阻塞路径;重试次数/退避/总超时有文档化数值(窗口>Neon 唤醒延迟且<Cloud Run 请求超时,实现时核实);彻底不可用经 WriteError 返 5xx 不 panic"},
+    {"id": "FR11", "type": "functional", "priority": "must", "description": "CI 增量 gate:verify.sh 用配置存在性门控([ -f sqlc.yaml ] 才跑 sqlc gate、db/migrations 非空才跑 migration gate,跳过时显式打印原因防假绿);sqlc 无漂移=go tool sqlc generate 后 git diff --exit-code 非空即 fail;migration 可跑=CI 内 dockerized Postgres 跑 up 后 down 双向断言,不连 Neon;新 gate 对 T1 自身产物真 CI runner 跑绿一次"},
+    {"id": "NFR1", "type": "non_functional", "priority": "must", "description": "迁移可回滚(含数据安全边界);服务进程启动路径不执行迁移(对齐 ROADMAP 缩零无常驻进程/缩零迁移触发明确)"},
+    {"id": "NFR2", "type": "non_functional", "priority": "must", "description": "internal/platform/db 及新增依赖闭包不得 import internal/http 与 internal/modules(继承 T0,verify.sh 依赖方向检查 CI 强制);连接池消费方向为上层注入调用 db,据此约束 FR3 接口"},
+    {"id": "NFR3", "type": "non_functional", "priority": "must", "description": "连接池/DSN 中敏感项复用 config.Secret 类型脱敏,不新增明文 secret 读取面(继承 T0)"},
+    {"id": "NFR4", "type": "non_functional", "priority": "should", "description": "连接池可观测经 T0 既有 slog JSON:重连/重试(含次数)/获取失败事件+必要时 pool.Stat() 指标(字段名实现时核实 pgxpool API),沿用既有字段风格(实际字段名 latency_ms);不得以 /livez 探 DB 实现可观测"},
+    {"id": "NFR5", "type": "non_functional", "priority": "must", "description": "/livez 保持不发起 DB 连接(继承 T0 AC11;连接池引入后尤其钉死,否则破 AC11+Neon 缩零挂健康检查)"},
+    {"id": "NFR6", "type": "non_functional", "priority": "must", "description": "schema 单一真相源:迁移文件为唯一 schema 来源,sqlc 从它读、迁移向它写,不引入第二份 schema 定义(排除声明式 schema-as-code 工具如 atlas)"},
+    {"id": "NFR7", "type": "non_functional", "priority": "must", "description": "训练数据时效性闸门:所有 pgxpool 参数默认值/DSN 参数名/Neon 限额与缩零行为/Cloud Run 冷启动与 grace 数值,实现时以当前官方文档核实,PRD 与代码不写死凭记忆的魔数(呼应 ROADMAP R1+明博时效性纪律)"},
+    {"id": "NFR8", "type": "non_functional", "priority": "should", "description": "双缩零分层验收:拆可立即验(重试逻辑单测 mock 失败→重试→成功)与必须真实线上验(真缩零首请求成功);线上部分在 T0 部署链未就绪时显式标 deferred,禁用本地/单测绿冒充线上绿声称双缩零已验"},
+    {"id": "NFR9", "type": "non_functional", "priority": "should", "description": "本站 PRD 可独立验收/回滚/合并;显式记录代码回滚≠schema回滚(git revert T1 代码不撤已在 Neon 跑过的迁移,需独立 down 处理)"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC1", "description": "服务运行时路径(run()/HTTP 壳)经 grep 不出现裸 pgx.Connect、只经连接池获取连接;-smoke 子命令仍走一次性裸连接 SELECT 1 且行为与 T0 一致;两条路径代码注释区分用途", "verifiable_by": "code_review", "requirement_refs": ["FR1"]},
+    {"id": "AC2", "description": "连接池参数通过 NEON_DSN 的 query string 传入(经 pgxpool ParseConfig 解析);config.Config 字段集相对 T0 不新增(仍三字段)或新增字段在 PRD 有记录理由;DSN 未指定的池参数在 db 包内有默认值;DSN 仍为 config.Secret 类型", "verifiable_by": "code_review", "requirement_refs": ["FR2", "NFR3"]},
+    {"id": "AC3", "description": "grep -r pgxpool.Pool internal/modules/ 为空(具体类型不穿模块边界);db 包导出的连接获取接口含 Exec/Query/QueryRow 并预留 Begin;*pgxpool.Pool 仅出现在 db 包内部与 main.go", "verifiable_by": "code_review", "requirement_refs": ["FR3"]},
+    {"id": "AC4", "description": "pool_max_conns 默认值显式设置且小于 Neon 套餐连接上限(不依赖 pgxpool 库默认值);PRD/代码注释写明查 Neon 当前套餐上限步骤并标注默认值×预期最大实例数≤上限;涉及的 Neon 限额数值标实现时核实当前官方文档", "verifiable_by": "code_review", "requirement_refs": ["FR4", "NFR7"]},
+    {"id": "AC5", "description": "sqlc 生成代码落在 internal/platform/db/ 子树内并含 sqlc 生成标记注释;internal/ 顶层子目录集合相对 ROADMAP 树无新增;sqlc.yaml 的 schema 路径指向迁移文件目录,不存在独立于迁移的第二份 schema DDL", "verifiable_by": "code_review", "requirement_refs": ["FR5", "NFR6"]},
+    {"id": "AC6", "description": "sqlc 版本锁定在 go.mod(tool 指令或等价 tools.go);verify.sh 中调用 go tool sqlc(或等价锁版本方式)而非全局安装的 sqlc,CI 与本地用同一 sqlc 版本", "verifiable_by": "code_review", "requirement_refs": ["FR5"]},
+    {"id": "AC7", "description": "迁移规范文档写明:每个迁移在事务内执行(除显式标注不可事务化的 DDL)+所选工具 dirty 状态恢复步骤;down 适用边界(本地/未发布撤销 vs 生产前滚修复);破坏性 down 须标 IRREVERSIBLE 且不入常规回滚流程", "verifiable_by": "code_review", "requirement_refs": ["FR6", "NFR1"]},
+    {"id": "AC8", "description": "存在一对 up/down 迁移建立自验载体;存在一条 sqlc query 引用该载体并生成可编译 Go 代码;存在测试经连接池执行该 query 返回预期结果(可在本地/CI dockerized Postgres 跑);该载体注释标明为基础设施自验用途", "verifiable_by": "automated_test", "requirement_refs": ["FR7"]},
+    {"id": "AC9", "description": "服务进程启动路径(main.go/run())经 grep 不含任何迁移调用(migrate/Up()/goose up 等);迁移触发为部署流程中独立于应用启动的一步,体现在 docs/DEPLOY.md 的部署前步骤", "verifiable_by": "code_review", "requirement_refs": ["FR8", "NFR1"]},
+    {"id": "AC10", "description": "进程启动不阻塞等待 DB 连接成功(连接池 lazy 连接,启动期不强制 ping);shutdown 路径中 pool.Close() 在 srv.Shutdown(ctx) 返回之后调用;池实例经构造参数注入,不经全局变量", "verifiable_by": "code_review", "requirement_refs": ["FR9"]},
+    {"id": "AC11", "description": "/livez handler 依赖闭包不含 db 包(go list -deps 校验,继承 T0 AC11);双缩零重连/重试逻辑经 grep 不出现在 livez 或启动阻塞路径;Neon 缩零时 /livez 仍返回 200(后者记 manual,见 AC15 分层)", "verifiable_by": "code_review", "requirement_refs": ["FR10", "NFR5"]},
+    {"id": "AC12", "description": "删除 sqlc.yaml/db/migrations 后两 gate 被跳过且 CI 仍绿、日志显式打印跳过原因(证明不空跑);手改一处 sqlc 生成物或改 SQL 不重跑 generate 则 CI 红(证明 gate 通电);migration gate 对 dockerized Postgres 跑 up+down 双向断言成功", "verifiable_by": "automated_test", "requirement_refs": ["FR11"]},
+    {"id": "AC13", "description": "verify.sh 及 .github/workflows/*.yml 经 grep 不出现 *.neon.tech 或 Neon DSN;CI 的 migration 校验使用 workflow 内 dockerized Postgres(service container),verify.sh 连 localhost PG", "verifiable_by": "code_review", "requirement_refs": ["FR11"]},
+    {"id": "AC14", "description": "db 包及其新增依赖闭包经 verify.sh 的依赖方向检查通过(不含 internal/http/internal/modules);对故意让 db 包 import internal/http 的改动,verify.sh 报红", "verifiable_by": "automated_test", "requirement_refs": ["NFR2"]},
+    {"id": "AC15", "description": "FR10 重试逻辑有单元测试覆盖首次连接失败→重试→成功路径,断言重试次数上限与退避;真实 Cloud Run+Neon 缩零后首请求成功标为 manual,且在 T0 部署链未就绪时显式标 deferred,不用单测绿代替线上绿声称双缩零已验", "verifiable_by": "automated_test", "requirement_refs": ["FR10", "NFR8"]},
+    {"id": "AC16", "description": "连接池重连/重试/获取失败事件产生 slog JSON 日志(字段命名对齐 T0 既有风格,含事件类型与重试次数);该日志走 T0 既有 slog 出口,不新增 metrics HTTP 端点;/livez 仍 grep 不到 db/pool import 或 Ping", "verifiable_by": "code_review", "requirement_refs": ["NFR4"]},
+    {"id": "AC17", "description": "PRD 含代码回滚不等于 schema 回滚的说明(git revert 代码不撤已跑迁移,需独立 down);本站交付物可独立 git revert 且不破坏 T0 既有测试(回滚后 verify.sh 仍绿)", "verifiable_by": "manual_check", "requirement_refs": ["NFR9"]}
+  ],
+  "edge_cases": [
+    {"id": "E1", "description": "缩零唤醒连接风暴:Cloud Run 唤醒瞬间多请求并发建连,若 pool_max_conns 设大则超 Neon 套餐上限、Neon 拒连首请求重试也连不上", "expected_behavior": "FR4 保守 MaxConns 护栏+FR10 退避;NG8 不做保活;首请求经退避重连成功或经 WriteError 返 5xx 不 panic"},
+    {"id": "E2", "description": "迁移多实例并发竞争:若迁移挂服务启动路径,缩零并发拉起 N 实例则 N 个迁移并发跑同套 up 竞争/部分失败/启动阻塞", "expected_behavior": "NG7 启动路径不跑迁移+FR8 触发解耦;迁移只由部署前独立步骤执行"},
+    {"id": "E3", "description": "迁移半途失败/脏状态:一个迁移含多条 DDL,跑到第二条失败致 schema 半应用、版本表标 dirty", "expected_behavior": "FR6 每迁移事务内执行回滚到该迁移前;按所选工具文档化的 dirty 恢复步骤处理"},
+    {"id": "E4", "description": "down 迁移破坏性丢数据:DROP COLUMN 的 down 语法可回滚但数据不可逆丢失,或生产回滚部署时顺手跑 down", "expected_behavior": "FR6 破坏性 down 标 IRREVERSIBLE 且不入常规回滚;生产默认前滚修复不跑 down"},
+    {"id": "E5", "description": "本地无缩零环境致双缩零假绿:FR10 在本地(无 Cloud Run/Neon 缩零)跑永远绿但线上可能炸", "expected_behavior": "NFR8 分层验收,线上部分标 deferred、不用本地绿冒充;AC15 禁单测代替线上声称已验"},
+    {"id": "E6", "description": "SIGTERM 关池打断 in-flight 查询:若 pool.Close() 在 HTTP drain 之前或并发,在途请求拿到已关闭的池", "expected_behavior": "FR9 关池在 srv.Shutdown 返回之后,先排空在途再关池"},
+    {"id": "E7", "description": "代码回滚但 schema 已迁移:git revert T1 代码不会撤销已在 Neon 跑过的迁移致 schema 与代码脱节", "expected_behavior": "NFR9 显式记录该区分;schema 回退走独立 down 而非依赖 git revert"},
+    {"id": "E8", "description": "CI gate 空跑假绿:T1 落地前 sqlc/迁移为空时 gate 形同虚设", "expected_behavior": "FR11 配置存在性门控+跳过打印原因+通电测试(改坏即红);T1 落地后 gate 对自身产物激活"},
+    {"id": "E9", "description": "sqlc query 引用尚不存在的表(工作流顺序搞反):先写 sqlc 查询引用还没迁移建的表致 generate 失败", "expected_behavior": "迁移规范明确先迁移建 schema 再 sqlc generate 的工作流顺序"}
+  ],
+  "risks": [
+    {"id": "R1", "description": "Go 新手+AI 生成在连接池/迁移/缩零等高杠杆环节判断不足,易凭过时记忆写错 pgxpool 默认值/Neon 限额(ROADMAP R1)", "impact": "high", "likelihood": "medium", "mitigation": "NFR7 训练数据时效性闸门(实现时查文档不写魔数)+FR3 窄接口+NFR8 分层验收+实现后 Codex 异源 review+FR7 自验载体打通真实链路", "owner": "Mingbo"},
+    {"id": "R2", "description": "连接风暴打爆 Neon 套餐连接上限", "impact": "high", "likelihood": "medium", "mitigation": "FR4 保守 MaxConns 护栏+查套餐上限步骤+FR10 退避;NG8 不保活", "owner": "engineering"},
+    {"id": "R3", "description": "双缩零假绿(本地/单测绿冒充线上验证)", "impact": "medium", "likelihood": "high", "mitigation": "NFR8 分层验收,线上部分显式 deferred;AC15 禁单测代替线上", "owner": "engineering"},
+    {"id": "R4", "description": "迁移 down 误跑致生产数据不可逆丢失", "impact": "high", "likelihood": "low", "mitigation": "FR6 破坏性 down 标 IRREVERSIBLE+生产前滚默认+每迁移事务执行", "owner": "engineering"},
+    {"id": "R5", "description": "迁移工具选型 lock-in(被 T2+ 继承,改它返工所有迁移)", "impact": "medium", "likelihood": "low", "mitigation": "T1 阶段迁移文件极少切换成本低+NFR6 排除 atlas+Q1 给 default 留推翻口", "owner": "Mingbo"},
+    {"id": "R6", "description": "schema 漂移(sqlc 生成与实际 schema 不一致致运行时错)", "impact": "medium", "likelihood": "medium", "mitigation": "NFR6 schema 单一真相源+FR11 sqlc 无漂移 gate 通电(改坏即红)", "owner": "engineering"}
+  ],
+  "default_decisions": [
+    {"id": "D1", "decision": "下一站范围=纯 T1 数据接入层,T0 部署冒烟+CI真runner跑绿作为 T1 动手前置(待完成,不在本 PRD 实现)", "reason": "codebase-scan 发现 T0 第5、6 项仅有脚手架无执行痕迹,协调者出 3 选项,明博在范围选择题选纯 T1·T0 部署作前置", "override_if": "明博改为先收口 T0 线上闭环,则重锻造为 T0 收尾 PRD、T1 后排"},
+    {"id": "D2", "decision": "迁移触发时序解耦:T1 交付迁移规范+本地/dockerized 可跑+触发机制设计(部署前独立步骤),真实线上实跑 defer 到 T0 部署链通后", "reason": "五路共识+redteam 洞见——T0 线上未就绪时四个触发选项集体受限,时序解耦让 T1 不被线上环境阻塞", "override_if": "T0 部署链已通则迁移实跑验证并入 T1"},
+    {"id": "D3", "decision": "池参数走 NEON_DSN query string(pgxpool 原生解析),不扩 config.Config 三字段", "reason": "architecture 推荐——保 T0 config 克制设计+不新开 env 面,参数与连接串同源、Secret 包裹不变", "override_if": "某参数无法经 DSN 表达则扩 Config 字段并记录突破理由"},
+    {"id": "D4", "decision": "基础设施自验载体复用迁移工具版本表(如 schema_migrations)或一张标注的自检表,配一条 sqlc query", "reason": "综合 implementation/requirement(要真实表才能验迁移→sqlc 闭环)+architecture(无业务 down 债);用版本表则零额外 schema 残留", "override_if": "所选工具版本表不适合做 sqlc 样本,则建标注的临时自检表+在 T2 前置清理"},
+    {"id": "D5", "decision": "sqlc 生成代码落 internal/platform/db/gen/", "reason": "复用既有 platform/db 路径、不新开 internal 顶层子目录(对齐 ROADMAP 树+T0 NG3);与 T3 internal/contracts/generated(spec→Go)按来源区分", "override_if": "多 schema 需不同布局"},
+    {"id": "D6", "decision": "CI 的 migration 校验跑 dockerized Postgres,不连 Neon", "reason": "对齐 T0 PR gate 不连远端 flaky 原则;Neon 冷启动+凭据会拖垮确定性", "override_if": "无(远端验证作独立/部署期 job,不进 PR gate)"},
+    {"id": "D7", "decision": "sqlc 版本经 Go 1.25 go tool 机制锁定(go.mod tool 指令)", "reason": "与 ROADMAP/T0 的 Go 版本三处锁定可复现哲学一致,CI 与本地同版本、无需全局安装", "override_if": "实测 Go 1.25 不支持 go tool 锁 sqlc,则回退 tools.go+go run 模式"},
+    {"id": "D8", "decision": "保留 T0 的 -smoke/db.Smoke 一次性裸连接不动,FR1 只替换服务运行时连接获取", "reason": "-smoke 是 T0 部署冒烟基础设施(T0 AC10/AC12 依赖),never break userspace;冒烟要最便宜证明 DSN+网络通,起池子反而更重", "override_if": "无"}
+  ],
+  "open_questions": [
+    {"id": "Q1", "question": "迁移工具最终选型?", "why_mingbo_owned": "会被 T2-T8 所有有状态站继承的长期工具链 lock-in;且明博熟 Node.js 可能有 Prisma 声明式/knex 命令式的迁移心智偏好,工具手感是个人运维偏好", "recommended_default": "golang-migrate(纯 SQL up/down、生态最大、CLI+库两用、Neon 兼容,与 sqlc 纯 SQL 心智一致);已排除 atlas(声明式引入第二份 schema 真相源违 NFR6);候选 goose/tern(jackc 与 pgx 同源)亦可;T1 动手时定"},
+    {"id": "Q2", "question": "Neon 当前套餐连接数上限+用 pooler 端点还是直连端点?", "why_mingbo_owned": "套餐连接上限是明博云账号实际状态协调者无法查;pooler vs 直连端点连接语义不同(影响 MaxConns 取值),T0 已留此二选一坑", "recommended_default": "实现前确认当前套餐连接上限,pool_max_conns 取保守值(使×预期最大实例数≤上限);端点 pooler/直连二选一(缩零场景下唤醒/连接复用语义有别,实现时核实当前 Neon 文档);并入 T1 动手前置 checklist"}
+  ],
+  "tasks": [
+    {"id": "T1", "description": "选定迁移工具(Q1)+建 db/migrations/ 布局与命名约定+写基础设施自验载体的首对 up/down 迁移(事务内执行;down 数据安全规范:IRREVERSIBLE 标注+生产前滚)", "owner_agent": "implementer", "deps": [], "done_when": ["AC7"]},
+    {"id": "T2", "description": "配 sqlc.yaml(schema 指向迁移文件,单一真相源)+go tool 锁 sqlc 版本+写自验 query+生成代码到 internal/platform/db/gen/(带生成标记)", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC5", "AC6"]},
+    {"id": "T3", "description": "pgxpool 连接池替换运行时裸连接(保留 -smoke)+池参数走 DSN query string+MaxConns 护栏+窄接口(DBTX+预留 Begin)+main.go lazy 建池+关池在 srv.Shutdown 后", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC1", "AC2", "AC3", "AC4", "AC10"]},
+    {"id": "T4", "description": "双缩零首请求重连重试(封装 db 包,不入 livez/启动)+重试逻辑单元测试(mock 失败→重试→成功)+连接池可观测 slog 事件+livez 不探 DB 守护断言", "owner_agent": "implementer", "deps": ["T3"], "done_when": ["AC11", "AC15", "AC16"]},
+    {"id": "T5", "description": "verify.sh 加 sqlc/migration 增量 gate(配置存在性门控+sqlc diff+dockerized Postgres up/down+不连 Neon)+workflow 加 service container+db 包依赖方向自验", "owner_agent": "implementer", "deps": ["T1", "T2", "T3"], "done_when": ["AC12", "AC13", "AC14"]},
+    {"id": "T6", "description": "整链 automated_test:自验载体经连接池执行 sqlc query 返回预期结果;跑 verify.sh 全绿(新 gate 对 T1 自身产物激活并通过)", "owner_agent": "test-runner", "deps": ["T3", "T5"], "done_when": ["AC8"]},
+    {"id": "T7", "description": "docs/DEPLOY.md 加迁移触发步骤(部署前独立步骤)+双缩零 L2 manual 验收 runbook+代码回滚≠schema回滚说明;标注 deferred 项(线上实跑验证依赖 T0 部署链通)", "owner_agent": "implementer", "deps": ["T3", "T4"], "done_when": ["AC9", "AC17"]}
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/t1-data-access/prd.md",
+    "handoff": "product-requirements/t1-data-access/handoff.json"
+  },
+  "next_prompt": "用 product-requirements/t1-data-access/handoff.json 落地 T1 数据接入层。动手前置:确认 T0 部署冒烟+CI真runner跑绿状态(D1),定 Q1 迁移工具(默认 golang-migrate)、Q2 Neon 套餐连接上限+端点。按 tasks T1→T7 顺序:迁移工具+自验载体首迁移(事务/IRREVERSIBLE)→sqlc 工作流(schema 指向迁移/go tool 锁版本)→pgxpool 替换运行时裸连接(保留 -smoke)+DSN query 参数+窄接口+lazy 建池→双缩零重试(封装 db 包不入 livez)+单测+可观测→verify.sh 增量 gate(配置门控/sqlc diff/dockerized PG up-down/不连 Neon)→整链 automated_test→DEPLOY.md 迁移步骤+回滚语义。所有 pgxpool 参数/Neon 限额/Cloud Run 数值实现时查当前官方文档不凭记忆(NFR7)。双缩零线上验收在 T0 部署链未就绪时标 deferred 不用本地绿冒充(NFR8)。实现后对连接池/迁移高杠杆代码做 Codex 异源 review。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": ["codebase-scan", "architecture", "implementation", "requirement", "redteam"],
+    "codex_used": false,
+    "codex_downgraded": false
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shaomingbo/server-infra-toolkit/internal/modules/auth/contract/refresh.schema.json",
+  "title": "RefreshSession",
+  "description": "Wire shape of the POST /v1/auth/refresh success response (T2 frozen client contract; shares the loginSession struct). expiresAt is the new access token's expiry as a Unix MILLISECOND absolute timestamp (integer), NOT seconds. Kept as a separate file from login so a future divergence of either wire is caught independently.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["userId", "accessToken", "refreshToken", "expiresAt"],
+  "properties": {
+    "userId": {
+      "type": "string"
+    },
+    "accessToken": {
+      "type": "string"
+    },
+    "refreshToken": {
+      "type": "string"
+    },
+    "expiresAt": {
+      "type": "integer"
+    }
+  }
+}

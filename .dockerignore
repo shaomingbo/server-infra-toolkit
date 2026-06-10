@@ -1,0 +1,12 @@
+# NFR2: secrets and irrelevant files must not enter image layers.
+.env
+.env.*
+*.key
+*.pem
+.git
+/bin
+/dist
+/tmp
+Dockerfile
+README.md
+product-requirements

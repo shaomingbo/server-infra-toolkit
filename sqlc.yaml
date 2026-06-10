@@ -1,0 +1,19 @@
+version: "2"
+# sqlc schema-first 工作流(T2):迁移目录是 schema 的单一真相源(NFR6)。
+# 版本锁在 tools/go.mod(独立 tools module 的 tool 指令),不污染主服务 module;不全局安装。
+# 调用:`cd tools && go tool sqlc -f ../sqlc.yaml generate`。下方 schema/queries/out
+# 的相对路径以本文件(sqlc.yaml)所在目录(仓库根)为基准,而非 CWD。
+sql:
+  - engine: "postgresql"
+    # schema 直接指向 goose 迁移目录:sqlc 解析 -- +goose Up 段的 DDL,
+    # 自动忽略 -- +goose Down 段。不另建第二份 schema DDL(NFR6)。
+    schema: "db/migrations"
+    # 查询源文件目录(自验 query 落这里)。
+    queries: "sql"
+    gen:
+      go:
+        package: "dbgen"
+        out: "internal/platform/db/gen"
+        sql_package: "pgx/v5"
+        # 生成 Querier 接口便于上层 mock。
+        emit_interface: true

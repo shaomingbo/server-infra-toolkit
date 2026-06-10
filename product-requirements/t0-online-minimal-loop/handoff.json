@@ -1,0 +1,133 @@
+{
+  "slug": "t0-online-minimal-loop",
+  "source_type": "execution_plan",
+  "mode": "L1",
+  "title": "T0 线上最小闭环(server-infra-toolkit 第一推进站)",
+  "summary": "把 server-infra-toolkit(Go 服务端基础设施,独立新 repo,代码层 greenfield)从空仓库带到能真实部署上线的最小骨架。范围 6 项:HTTP 服务壳、统一错误响应信封、服务端自身结构化日志、配置与密钥注入、CI 入口脚本、一次真实 Cloud Run/Neon 部署冒烟;并在第一站一次性落定顶层目录树、CI 约定与四项接口契约(包依赖方向、错误信封、版本语义、config 加载机制)的冻结边界。目的是把明博最大的两个未知(Go 上手与部署链)在最便宜的时点点亮,并给后续 T1-T6 一套不需再起迭代去补的地基。本 PRD 由协调者并行调度 5 个 opus sub agent(1 扫描客户端取证加 4 视角批判)综合而成,mode L1。",
+  "goal_alignment": {
+    "status": "clear",
+    "target_user": "明博——规划者加唯一实现者,熟 Node.js、Go 新手,单人开发加 AI 杠杆;次要消费者:后续 T1-T6 各站实现 agent(复用 T0 的目录树、CI、错误信封、日志、config 机制)与客户端 app-infra-toolkit(契约对端,消费服务端 HTTP 状态码做错误归一)。",
+    "problem": "服务端 greenfield,需要一个能真实上线的最小骨架承载后续所有模块;同时把 Go 加部署链这个最大未知在最便宜处先点亮,并避免客户端历史痛点(事后专门起迭代补目录/CI、重排被依赖路径)。",
+    "success_outcome": "clone repo 后本地 scripts/verify.sh 全绿、push 触发 GitHub Actions 真 runner 跑绿、一条命令部署到 Cloud Run、/livez 返回 200 且日志能看到 request id 与时延与部署版本、一次性 SELECT 1 证明连通 Neon、整条部署链打通;顶层目录树加 CI 约定加四项接口契约已写死冻结,后续模块接入零目录/CI 迁移。",
+    "scope_boundary": "范围=6 项闭环加目录/CI 约定加四项接口契约冻结加本地可跑性;非目标=DB 接入层(T1)、auth(T2)、业务对端、完整 codegen(T3 起)、限流(各对端站)、完整健康检查/优雅关闭/多环境(T6)、签名私钥(T4)、业务错误码枚举闭集。",
+    "first_acceptance_signal": "一次 Cloud Run 部署后对线上 URL 跑冒烟脚本,5 条端到端断言全绿(见 AC12)。",
+    "confidence": "high",
+    "alternatives_considered": []
+  },
+  "goals": [
+    "6 项闭环逐项可跑通,且每项都有运行时验收锚点(不靠文档列全了过关)。",
+    "一次落定顶层目录树、CI 约定与四项接口契约,区分冻结集与自治集两张清单,后续模块接入零目录/CI 迁移。",
+    "本地可跑性:clone 后照 README 不超过 3 步即可本地起 server 加 verify.sh 绿,降低后续每站上手摩擦。",
+    "为 T1-T6 留接缝但不超前抽象(config 机制与内容分离、错误信封 append-only 扩展)。"
+  ],
+  "non_goals": [
+    "不建 pgx 连接池、不引 sqlc、不建表、不写迁移(全属 T1);T0 的连通 Neon 是一次性裸连接 SELECT 1 用完即关。",
+    "不做 auth、不加 Bearer 中间件、不建任何业务/对端路由(属 T2);T0 只有运维探针端点。",
+    "不实现限流/配额(NFR5 首次落地在 T2/T5 真实入口;T0 无业务入口可限)。",
+    "不做完整健康检查(依赖探测)、不做优雅关闭连接 draining、不做多环境/成本告警完整版(属 T6);T0 只做最小 /livez 加可选 SIGTERM 短 grace。",
+    "不碰签名私钥(属 T4);T0 唯一真 secret 是 Neon DSN,不为演示密钥注入而造 secret。",
+    "不定义业务错误码枚举闭集(各业务站按需 append;T0 只定错误信封结构加通用 slug)。",
+    "不建完整 codegen 生成器(属 T3 起);internal/contracts/generated 在 T0 不建实体文件。"
+  ],
+  "assumptions": [
+    {"id": "A1", "text": "明博的 GCP 项目可建 Secret Manager 并能给 Cloud Run runtime service account 授 secretAccessor(D2 与 Q1 前提)。", "confidence": "medium"},
+    {"id": "A2", "text": "明博有 Neon 账号加一个 project/database 加可用 DSN。", "confidence": "medium"},
+    {"id": "A3", "text": "明博有 GitHub repo 加 Actions 可用(CI 首跑)。", "confidence": "medium"},
+    {"id": "A4", "text": "技术栈沿用前序决策:Go 加 net/http 加 Cloud Run 加 Postgres/Neon 加 Secret Manager,部署 Cloud Run 起步、Hetzner+Coolify 备选。", "confidence": "high"},
+    {"id": "A5", "text": "Cloud Run 注入 PORT 环境变量(默认 8080)并注入服务 revision 环境变量;revision 变量名实现时以 Cloud Run 当前文档核实,不凭记忆硬写。", "confidence": "medium"},
+    {"id": "A6", "text": "Neon 强制 TLS,DSN 需含 sslmode=require;具体值与 pooler/直连端点选择实现时核实。", "confidence": "medium"}
+  ],
+  "requirements": [
+    {"id": "FR1", "type": "functional", "priority": "must", "description": "HTTP 服务壳:net/http 起 server,监听 Cloud Run 注入的 PORT 环境变量(缺省 fallback、bind 0.0.0.0);中间件链固定顺序 recover(最外)→request-id→access-log→handler,所有错误经统一错误响应出口。"},
+    {"id": "FR2", "type": "functional", "priority": "must", "description": "统一错误响应信封:所有错误经统一出口;HTTP status 表达错误类别(客户端靠 status 归一);响应体为可扩展稳定信封(error.code 为通用 slug、error.message、requestId);T0 不定义业务错误码枚举闭集;401/429 等留各业务站以新增 code 值加可选字段 append-only 扩展,不改信封顶层结构。"},
+    {"id": "FR3", "type": "functional", "priority": "must", "description": "服务端自身结构化日志:每请求一条 JSON 日志输出到 stdout,含 request_id、method、path、status、latency、version 六字段;request_id 优先透传入站 X-Request-Id,缺失则生成并回写响应 header。这是服务端自身可观测(NFR4),与 T5 客户端事件接收端点区分,不混。"},
+    {"id": "FR4", "type": "functional", "priority": "must", "description": "配置与密钥注入:单一 Config struct,os.Getenv 为唯一读取面;本地用 .env(gitignored)加载,生产把 Neon DSN 存 Secret Manager 并由 Cloud Run --set-secrets 挂成 env(代码不调 Secret Manager SDK);Config 在 T0 只含 Port、Version 等非密项加经 secret 注入的 DSN,不为 T1/T2/T4 未来字段提前建抽象;secret 字段用专门类型(String() 与 MarshalJSON() 返回 REDACTED)从类型层阻止进日志。"},
+    {"id": "FR5", "type": "functional", "priority": "must", "description": "CI 入口脚本:scripts/verify.sh 为唯一入口(CI/hook 只调 bash scripts/verify.sh,脚本里不出现 linter 二进制名);首版 gate 为 gofmt -l(输出非空即失败)加 go vet 加 go test -count=1 ./...;接 .github/workflows/verify.yml 在 GitHub Actions 真 runner(版本显式 pin)跑绿一次;此 gate 只跑本地类校验,不触发任何远端部署。"},
+    {"id": "FR6", "type": "functional", "priority": "must", "description": "顶层目录树加四项接口契约冻结:按 ROADMAP 7.3 落定顶层目录契约(fixtures 布局按客户端实际修正);冻结对象=目录树第一层加四项接口契约(包依赖方向、错误信封、版本语义、config 加载机制)加 verify.sh 作为 CI 唯一入口;产冻结集与自治集两张显式清单;含受控演进出口(新增子目录/子包为 append 允许,重命名/删除已存在路径需 migration note 加更新冻结清单)。"},
+    {"id": "FR7", "type": "functional", "priority": "must", "description": "一次真实部署冒烟:构建容器(多阶段 Dockerfile)、先 --no-traffic 部署 Cloud Run 新 revision、跑冒烟脚本(5 断言)、全绿才 update-traffic 切流量;冒烟脚本化(scripts/smoke.sh 接 base URL,退出码非 0 即失败),作独立/手动 job 不进 PR gate;部署带成本护栏(--max-instances 小值加 --min-instances=0 显式)。"},
+    {"id": "FR8", "type": "functional", "priority": "should", "description": "本地可跑性:README 含不超过 3 步本地启动指引;clone 后按指引能本地起 server 且 ./scripts/verify.sh 退出码 0;缺 .env 时报明确错误而非 panic。"},
+    {"id": "FR9", "type": "functional", "priority": "must", "description": "module path 与 Go 版本一次定死:go.mod 的 module path 作为与目录树同级的冻结契约(给出确切字符串,被依赖后不可侵犯);Go 版本三处一致(go.mod 的 go 指令、setup-go version、Dockerfile FROM golang 标签)。"},
+    {"id": "NFR1", "type": "non_functional", "priority": "must", "description": "无常驻进程:HTTP 壳适配 Cloud Run 缩零(无后台常驻 goroutine、无本地状态依赖);T0 可选最小 SIGTERM 响应(server.Shutdown 短 grace),不做连接 draining(留 T6)。"},
+    {"id": "NFR2", "type": "non_functional", "priority": "must", "description": "密钥注入纪律:Neon DSN 走 Secret Manager(明博 R3 选定);密钥/密码不进 env 明文、不进 repo、不进 image layer、不进日志;.dockerignore 排 .env、*.key、*.pem、.git;不用 build-arg 传 secret。"},
+    {"id": "NFR3", "type": "non_functional", "priority": "should", "description": "包依赖方向契约:internal/platform 为最底层,不得 import internal/http 与 internal/modules;internal/http 可依赖 platform,不依赖 modules 具体实现;internal/modules 之间不直接 import;可用 depguard 或 go list -deps 机器校验。"},
+    {"id": "NFR4", "type": "non_functional", "priority": "must", "description": "服务端自身可观测性 T0 就位:request_id、结构化日志、时延、部署版本;版本来源为 build 时 ldflags 注入 git short SHA(主)加 Cloud Run revision 环境变量兜底(具体变量名实现时核实)。"},
+    {"id": "NFR5", "type": "non_functional", "priority": "must", "description": "独立 repo CI 隔离:CI 只含 Go/Linux 步骤,不含 macOS 或 Xcode。"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC1", "description": "代码通过 os.Getenv(PORT) 读端口、ListenAndServe 处无硬编码端口字面量、bind 0.0.0.0;本地起服务后 curl /livez 返回 200。", "verifiable_by": "automated_test", "requirement_refs": ["FR1"]},
+    {"id": "AC2", "description": "中间件三件套各有断言:a 同进程两次请求的 request_id 不同;b 构造一条会 panic 的测试路由,触发后进程不退出、经统一错误出口返 5xx、日志记录该 panic;c 每请求 stdout 有一条含 method、path、status、latency 的 JSON 日志。", "verifiable_by": "automated_test", "requirement_refs": ["FR1", "FR3"]},
+    {"id": "AC3", "description": "curl 一个不存在路由,响应体是含 error.code、error.message、requestId 的固定 JSON 结构、Content-Type 为 application/json,且该响应的 requestId 与日志中该请求的 request_id 一致。", "verifiable_by": "automated_test", "requirement_refs": ["FR2"]},
+    {"id": "AC4", "description": "一次请求的日志 JSON 含 request_id、method、path、status、latency、version 六字段且非空;入站带 X-Request-Id 时日志 request_id 等于入站值。", "verifiable_by": "automated_test", "requirement_refs": ["FR3", "NFR4"]},
+    {"id": "AC5", "description": "线上 /livez 的 version 等于部署所用 git rev-parse --short HEAD(不是 dev 或 unknown);本地未注入时为确定 fallback 值 dev。", "verifiable_by": "manual_check", "requirement_refs": ["NFR4", "FR4"]},
+    {"id": "AC6", "description": ".gitignore 含 .env、*.pem、*.key(已就位);存在 .env.example 且值全为占位;.dockerignore 含 .env、*.key、*.pem、.git;secret 字段类型的 String() 与 MarshalJSON() 返回 REDACTED,单测断言含 secret 的 config 序列化或打日志后输出不含明文 secret 值;git log -p 全历史 grep 不到私钥头 BEGIN 标记。", "verifiable_by": "automated_test", "requirement_refs": ["NFR2", "FR4"]},
+    {"id": "AC7", "description": "Neon DSN 经 Secret Manager 注入(部署用 --set-secrets),不以明文出现在 workflow、repo、Dockerfile;Cloud Run runtime service account 绑定 roles/secretmanager.secretAccessor。", "verifiable_by": "manual_check", "requirement_refs": ["NFR2", "FR4"]},
+    {"id": "AC8", "description": "verify.sh 在故意制造一个 gofmt 违例时退出码非 0、在故意写一个失败测试时退出码非 0;repo 至少含 1 个真实 _test.go 文件,覆盖错误信封序列化、secret 脱敏、PORT 解析中至少 2 项;go test 带 -count=1。", "verifiable_by": "automated_test", "requirement_refs": ["FR5"]},
+    {"id": "AC9", "description": ".github/workflows/verify.yml 只调 bash scripts/verify.sh、不 spell 内部步骤、不出现 linter 二进制名;runner 版本显式 pin(非 latest);go.mod 的 go 指令、setup-go version、Dockerfile FROM golang 标签三处 Go 版本字符串一致;GitHub Actions 真 runner 跑绿一次。", "verifiable_by": "manual_check", "requirement_refs": ["FR5", "FR9", "NFR5"]},
+    {"id": "AC10", "description": "冒烟执行一次 SELECT 1 对 Neon 返回成功;grep -rn pgxpool internal/ cmd/ 为空;go.mod 无 sqlc 依赖;DB 探活代码带注释标注 T0 smoke only pool 见 T1 且行数小于 30;无 db/migrations 实体文件、无 sql 实体文件。", "verifiable_by": "automated_test", "requirement_refs": ["FR7"]},
+    {"id": "AC11", "description": "/livez handler 不发起任何 DB 连接(不 import db 探活包或不调用探活);Neon 缩零时 /livez 仍返回 200。", "verifiable_by": "automated_test", "requirement_refs": ["FR7"]},
+    {"id": "AC12", "description": "部署冒烟通过等于对线上 URL 的 5 条端到端断言全绿:一 Cloud Run revision Ready 且 serving;二 GET /livez 返回 200 且 version 等于 git SHA;三 Cloud Run 日志中该请求有结构化条目含 request_id、latency、version;四 一次性 SELECT 1 对 Neon 返回成功;五 GET 不存在路由返回约定错误信封 JSON。5 条同时绿才算冒烟通过。", "verifiable_by": "manual_check", "requirement_refs": ["FR7", "NFR4"]},
+    {"id": "AC13", "description": "部署采用先 --no-traffic 部署新 revision、跑冒烟、通过才 update-traffic --to-latest;冒烟失败时线上仍由旧 revision 或无流量的失败 revision 服务,用户不受影响(首次无旧 revision 的情况单独标注为已知例外);存在 scripts/smoke.sh 接受 base URL 参数,退出码非 0 即冒烟失败。", "verifiable_by": "manual_check", "requirement_refs": ["FR7", "NFR1"]},
+    {"id": "AC14", "description": "仓库含多阶段 Dockerfile,docker build 本地成功产出可运行镜像;builder 阶段含 CGO_ENABLED=0 GOOS=linux;runtime 基于 distroless 或 alpine(docker run --rm 镜像 which go 失败,即镜像不含 Go 工具链);docker history 各层无 secret 文件;无 ARG 传递 secret。", "verifiable_by": "manual_check", "requirement_refs": ["FR7", "NFR2"]},
+    {"id": "AC15", "description": "PRD 或 repo 含两张显式清单(frozen-paths 与 autonomous-paths);T0 完成后 find . -type d -empty 为空(无 .gitkeep 占位空目录);目录树文档每个节点标 T0 实体或后续实体化;CI 含一条检查:对模拟重命名 internal/http 或 internal/modules 子包的 diff 报红、对新增子目录放行。", "verifiable_by": "code_review", "requirement_refs": ["FR6"]},
+    {"id": "AC16", "description": "CI 含依赖方向检查(depguard 或 go list -deps 断言):internal/platform 的依赖闭包不含 internal/http 或 internal/modules;对故意让 platform/config import internal/http 的改动报红。", "verifiable_by": "automated_test", "requirement_refs": ["NFR3"]},
+    {"id": "AC17", "description": "PRD 声明错误信封顶层结构加 T0 不引入业务错误码枚举;声明 401 与 429 通过新增 code 值加可选字段扩展、不改信封顶层结构;探针端点不带 /v1/ 前缀、/v1/ 仅承载业务 API。", "verifiable_by": "code_review", "requirement_refs": ["FR2", "FR6"]},
+    {"id": "AC18", "description": "README 含不超过 3 步的本地启动指引;按指引 clone 后能本地起 server 且 ./scripts/verify.sh 退出码 0;缺 .env 时报明确错误而非 panic。", "verifiable_by": "manual_check", "requirement_refs": ["FR8"]}
+  ],
+  "edge_cases": [
+    {"id": "E1", "description": "部署冒烟失败:5 断言任一红。", "expected_behavior": "流量留旧 revision(首次无旧 revision 则失败 revision 不接流量),标 T0 未完成、排查部署链;这不算回滚操作,是未切流量。"},
+    {"id": "E2", "description": "PORT 未注入或被写死,容器报 failed to start and listen on the port defined by the PORT environment variable。", "expected_behavior": "代码必须读 os.Getenv(PORT)、bind 0.0.0.0、有 fallback 8080;这是 net/http 新手加 Cloud Run 的头号失败模式。"},
+    {"id": "E3", "description": "Cloud Run service account 缺 secretAccessor,运行时读 secret 报 403 PermissionDenied。", "expected_behavior": "部署前置 checklist 含授权步骤;冒烟失败第一排查项指向 IAM 而非 Go 代码。"},
+    {"id": "E4", "description": ".dockerignore 排了 .git 导致 builder 阶段 git rev-parse 失败,version 变成 dev 进生产。", "expected_behavior": "视为冒烟不通过(AC5);推荐用 --build-arg GIT_SHA 在 docker build 外面算好 SHA 传入,比容器内跑 git 可靠。"},
+    {"id": "E5", "description": "Neon 连接缺 sslmode,连不上(Neon 强制 TLS)。", "expected_behavior": "DSN 必须含 sslmode=require(实现核实具体值);pooler 端点与直连端点明确选一。"},
+    {"id": "E6", "description": "几乎空的 repo 上 go test ./... 对无测试包返回退出码 0、gofmt 默认只打印不返回非零,gate 形同虚设。", "expected_behavior": "gofmt -l 输出非空即失败加至少 1 个真测试加 go test -count=1(AC8),让首版 CI 真有牙。"},
+    {"id": "E7", "description": ".env 误提交进 git,真实 secret 进历史。", "expected_behavior": ".gitignore 已含 .env(已就位)加提供 .env.example 占位加 .dockerignore 排 .env,三层防护。"},
+    {"id": "E8", "description": "顶层目录后续被重排,撞硬编码路径(重蹈客户端 toolchain-cleanup)。", "expected_behavior": "冻结集 CI 检查对重命名或删除报红加受控演进出口(重命名需 migration note 加更新冻结清单)。"}
+  ],
+  "risks": [
+    {"id": "R1", "description": "Go 新手在部署链/Dockerfile/ldflags/IAM 等高杠杆环节判断不足,AI 生成的 Go 代码难以严格自审。", "impact": "high", "likelihood": "medium", "mitigation": "最大未知前置 T0 消化;每个踩坑点(PORT、CGO、GOOS、sslmode、secretAccessor、ldflags)写进 PRD 与 task;冒烟 5 断言防假绿。", "owner": "Mingbo"},
+    {"id": "R2", "description": "范围超做——顺手把 T1 的 DB 连接池、T2 的 auth、T6 的优雅关闭、NFR5 限流做进 T0(AI 倾向教程式完整)。", "impact": "medium", "likelihood": "high", "mitigation": "逐条 non-goal 钉死;AC10 与 AC11 机器校验(grep pgxpool 为空、/livez 不探 DB 等)。", "owner": "engineering"},
+    {"id": "R3", "description": "CI 或冒烟假绿——空跑绿、只连不发 query、只验 happy path。", "impact": "medium", "likelihood": "medium", "mitigation": "AC8 防空跑绿(gofmt -l 非空即 fail 加真测试加 -count=1);AC12 五断言含错误路径与真 query。", "owner": "engineering"},
+    {"id": "R4", "description": "密钥泄漏——进日志、进 image layer、进 git 历史。", "impact": "high", "likelihood": "medium", "mitigation": "NFR2 多层:专门类型 REDACTED 加 .dockerignore 加不 build-arg 传 secret 加 Secret Manager;AC6 单测加历史 grep。", "owner": "engineering"},
+    {"id": "R5", "description": "顶层契约定得太死或太松,撞客户端 toolchain-cleanup 覆辙。", "impact": "medium", "likelihood": "low", "mitigation": "冻结集与自治集两清单;只冻第一层加四接口契约;受控演进出口;greenfield 单构建系统风险本就低于客户端。", "owner": "engineering"},
+    {"id": "R6", "description": "GCP/Neon/GitHub 前置未就绪,导致 T0 部署或 CI task 阻塞。", "impact": "medium", "likelihood": "medium", "mitigation": "前置 checklist 作 Mingbo 介入节点(T6 CI 首跑、T9 部署);见 Q1。", "owner": "Mingbo"}
+  ],
+  "default_decisions": [
+    {"id": "D1", "decision": "T0 冒烟连 Neon 用一次性裸连接 SELECT 1(pgx.Connect 加 Close),不引连接池/sqlc/迁移。", "reason": "五路共识,连接池与缩零适配是 T1,T0 只证 DSN 加网络加 Neon 醒着。", "override_if": "明博想 T0 就建连接池,则 T1 范围前移。"},
+    {"id": "D2", "decision": "T0 密钥注入走 Secret Manager(Neon DSN 存 Secret Manager,Cloud Run --set-secrets 挂成 env,本地用 .env)。", "reason": "明博在 design-gate R3 选择题里选定,贯彻 NFR2 不留安全债。", "override_if": "GCP Secret Manager 未就绪(见 Q1),改 Cloud Run env 直配 DSN 并标 NFR2 临时例外、T4 收口。"},
+    {"id": "D3", "decision": "Cloud Run 部署用多阶段 Dockerfile,不用 Buildpacks。", "reason": "对 Go 新手可读、可本地 docker build 复现、ldflags 好注入;是 Hetzner+Coolify 备选路径的通用资产;distroless 镜像小。", "override_if": "明博想用 --source Buildpacks 省 Dockerfile,则放弃 ldflags 版本注入的可控性。"},
+    {"id": "D4", "decision": "部署版本号用 build 时 ldflags 注入 git short SHA 为主加 Cloud Run revision 环境变量兜底。", "reason": "唯一干净的版本来源,冒烟靠它确认线上是不是刚推的版本。", "override_if": "实测 Cloud Run 不注入该 revision 变量,则只用 ldflags 加本地 fallback。"},
+    {"id": "D5", "decision": "健康检查 /livez 不探 DB、走非版本化路径(不挂 /v1/)。", "reason": "依赖探测属 T6;探针挂 /v1/ 会把运维探针和业务版本轴错误耦合。原定 /healthz,因 GCP 保留该路径(T0 部署冒烟实测被边缘层 GFE 拦截、请求到不了容器)改用 /livez。", "override_if": "明博要 T0 就做 readiness/liveness 分离,前移 T6 部分。"},
+    {"id": "D6", "decision": "T0 不上 /v1/ URL 版本化,/v1/ 纪律从 T2 第一个业务端点起。", "reason": "codebase-scan 证据:客户端零 /v1/ URL 版本化,T0 也无业务端点。", "override_if": "明博要 T0 就立 /v1/ 命名空间约定。"},
+    {"id": "D7", "decision": "错误响应体定可扩展信封(error.code 通用 slug、error.message、requestId),T0 不定义业务错误码枚举闭集。", "reason": "客户端纯靠 HTTP status 归一、不解析 body code;业务码留各站 append-only。", "override_if": "业务站发现需 T0 就锁错误码枚举,则回填。"},
+    {"id": "D8", "decision": "顶层冻结对象为目录树第一层加四项接口契约(包依赖方向、错误信封、版本语义、config 加载机制)加 CI 唯一入口;产冻结集与自治集两清单;含受控演进出口。", "reason": "architecture 洞察冻结目录不等于锁接口,只冻目录名是客户端教训学一半。", "override_if": "明博认为四项接口契约某项不该在 T0 冻结。"},
+    {"id": "D9", "decision": "T0 只实体化当前用到的目录,不用 .gitkeep 占空目录,缺的目录由首次用到的站创建;fixtures 与 owning package 共置(修正 ROADMAP 7.3 的顶层 fixtures 目录)。", "reason": "git 不跟踪空目录、空目录让 CI 空跑;客户端实际把 fixtures 放各 module 内部、无顶层 fixtures 目录。", "override_if": "明博偏好 .gitkeep 占位完整目录树。"},
+    {"id": "D10", "decision": "go.mod module path 加 Go 版本作为与目录树同级的冻结契约(module path 给确切字符串、Go 版本三处一致)。", "reason": "module path 是被依赖后不可侵犯的接口,改它要全局替换。", "override_if": "module path 选错需改,走受控迁移流程。"},
+    {"id": "D11", "decision": "部署带成本护栏(--max-instances 设小值加 --min-instances=0 显式声明)。", "reason": "防单人开发者最怕的半夜账单(min-instances 大于 0 保活或失控重试会产生账单)。", "override_if": "明博要 min-instances 大于 0 换更低冷启动延迟,牺牲缩零。"},
+    {"id": "D12", "decision": "T0 不碰签名私钥(T4 才用),唯一真 secret 是 Neon DSN。", "reason": "避免为演示密钥注入而造 secret、过早引入 T4 能力。", "override_if": "明博要 T0 就验签名私钥注入链路。"}
+  ],
+  "open_questions": [
+    {"id": "Q1", "question": "T0 动手前,GCP 项目(加 Secret Manager 权限)、Neon 数据库(加 DSN)、GitHub repo(加 Actions)三处前置是否已就绪?", "why_mingbo_owned": "只有明博知道自己这三个云账号/项目的实际状态,且都需要他本人登录操作(gcloud 认证、建 Neon project、配 GitHub secrets),协调者无法代为确认或配置。", "recommended_default": "动手前按前置 checklist 逐项确认,缺失项先补齐;其中 Secret Manager 的 secretAccessor 授权是 D2 选定方案的硬前提,若未就绪则触发 D2 的 override(T0 临时改 Cloud Run env 直配 DSN,标 NFR2 例外,T4 收口)。"}
+  ],
+  "tasks": [
+    {"id": "T1", "description": "repo 骨架加目录冻结:建顶层目录树(只实体化用到的,不占空目录)、go mod init(定 module path)、cmd/api/main.go 空壳、.dockerignore 加 .env.example、写冻结集与自治集两清单。", "owner_agent": "implementer", "deps": [], "done_when": ["AC10", "AC15"]},
+    {"id": "T2", "description": "HTTP 壳加 /livez:net/http 监听 PORT、最小 mux、/livez 返回 200 加 version(先用 dev)。", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC1", "AC11"]},
+    {"id": "T3", "description": "三横切:结构化日志(JSON 到 stdout)、中间件链(recover→request-id→access-log 顺序固定)、统一错误出口加错误信封 schema。", "owner_agent": "implementer", "deps": ["T2"], "done_when": ["AC2", "AC3", "AC4", "AC17"]},
+    {"id": "T4", "description": "config 加载加密钥脱敏:LoadConfig 只读 env、本地 godotenv 加载 .env、Config 含 Port/Version/DSN、secret 专门类型返回 REDACTED、缺 .env 报明确错。", "owner_agent": "implementer", "deps": ["T2"], "done_when": ["AC6", "AC18"]},
+    {"id": "T5", "description": "version 注入接线:main.version 变量、ldflags 接线(--build-arg GIT_SHA)、Cloud Run revision 兜底。", "owner_agent": "implementer", "deps": ["T3", "T4"], "done_when": ["AC5"]},
+    {"id": "T6", "description": "verify.sh 加 CI(明博介入:首次真 runner):scripts/verify.sh(gofmt -l 非空即 fail / go vet / go test -count=1)加依赖方向检查加 .github/workflows/verify.yml 调脚本、真 runner 跑绿一次。", "owner_agent": "implementer", "deps": ["T3", "T4"], "done_when": ["AC8", "AC9", "AC16"]},
+    {"id": "T7", "description": "Dockerfile:多阶段(builder CGO_ENABLED=0 GOOS=linux 加 ldflags;runtime distroless 或 alpine)。", "owner_agent": "implementer", "deps": ["T5"], "done_when": ["AC14"]},
+    {"id": "T8", "description": "Neon 冒烟探活函数:裸 pgx.Connect 加 SELECT 1 加 Close,DSN 从 config 读,不建池/不引 sqlc,标注 T0-only。", "owner_agent": "implementer", "deps": ["T4"], "done_when": ["AC10"]},
+    {"id": "T9", "description": "Cloud Run 部署冒烟加回滚(明博介入:GCP/Neon/部署):gcloud run deploy --no-traffic、冒烟 5 断言、通过才 update-traffic;Secret Manager 挂 DSN 加授 secretAccessor;成本护栏。", "owner_agent": "implementer", "deps": ["T7", "T8"], "done_when": ["AC7", "AC12", "AC13"]}
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/t0-online-minimal-loop/prd.md",
+    "handoff": "product-requirements/t0-online-minimal-loop/handoff.json"
+  },
+  "next_prompt": "另起 session 执行 T0 实现:按本 PRD 的 14 节加 handoff tasks T1 到 T9 顺序落地 server-infra-toolkit 的线上最小闭环;动手前先确认 Q1 前置 checklist(GCP 加 Secret Manager 权限、Neon 加 DSN、GitHub 加 Actions),再从 T1(repo 骨架加目录冻结)起。每个 task 的 done_when 引用的 AC 是验收闸,尤其 AC8(防 CI 空跑绿)、AC10(冒烟不侵入 T1)、AC12(部署 5 断言防假绿)。owner 主力 implementer(opus);T6 CI 首跑与 T9 部署冒烟需明博介入 GitHub/GCP/Neon;密钥按 D2 走 Secret Manager。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": ["codebase-scan", "requirement", "redteam", "implementation", "architecture"],
+    "codex_used": false,
+    "codex_downgraded": false
+  }
+}

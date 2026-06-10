@@ -1,0 +1,135 @@
+{
+  "slug": "t3-contract-reconciliation",
+  "source_type": "idea",
+  "mode": "L2",
+  "title": "T3 契约对账(全双向 · 服务端持 schema 真相,两端各自 CI 校验)",
+  "summary": "给 auth login/refresh wire 建全双向防漂线:服务端把 wire 真相从 §6 自然语言升级成机器可读 schema(留服务端、纯 append),服务端 CI 校验自己 wire 符合它(自包含、无 submodule),客户端在其自己 CI 校验解码器符合它;两端各自防漂、各在其 CI 现形。",
+  "goal_alignment": {
+    "status": "selected",
+    "target_user": "服务端 + 服务端 CI(防服务端漂移)+ 客户端 app-infra-toolkit 及其 CI(防客户端漂移);直接操作者明博",
+    "problem": "单向只防服务端自己改坏 wire,防不住服务端和客户端契约不一致;明博要双向防漂,且不愿把服务端自己输出契约的真相所有权交出去。",
+    "success_outcome": "服务端持有机器可读 wire schema 当契约真相,服务端 CI 校验自己 wire 符合它,客户端 CI 校验解码器符合它;任一端漂移在其自己 CI 红。",
+    "scope_boundary": "服务端侧(本 PRD)= 写 schema + 服务端自检 + §6 升级,自包含可独立落地;客户端侧 = 独立前置活(pin/校验服务端 schema),本 PRD 只声明依赖、由明博协调客户端开站;不做实时双向(pin 天花板)、不做 codegen 生成器、不把真相搬出服务端。",
+    "first_acceptance_signal": "改 loginSession 一个 json struct tag(camelCase→snake_case)但不更新 schema → 服务端 conformance 测试红、go test ./... 退出码非 0。",
+    "confidence": "high",
+    "alternatives_considered": [
+      {
+        "id": "GA1",
+        "target_user": "服务端 CI / 服务端自己",
+        "success_outcome": "服务端 golden 自检,客户端 spec 仅人工对照不进 CI",
+        "scope_sentence": "纯服务端单向自检",
+        "p0_conflict": "客户端 spec 不进 CI 比对回路",
+        "if_wrong_wasted_work": "单向抓不出两端各自自洽但互不一致,明博看到此盲区后推翻升级双向"
+      },
+      {
+        "id": "GA2",
+        "target_user": "服务端 + 客户端两端及各自 CI",
+        "success_outcome": "服务端 wire 与客户端契约的漂移,任一端都在其 CI 被抓",
+        "scope_sentence": "全双向,客户端契约经 S5 落在客户端自己 CI 比对",
+        "p0_conflict": "客户端契约进 CI 比对回路(经 S5 落客户端 CI)",
+        "if_wrong_wasted_work": "若只需单向则白付客户端开站 + 跨 repo pin 成本"
+      }
+    ]
+  },
+  "goals": [
+    "auth login/refresh wire 有服务端持有的机器可读 schema 当契约真相,服务端漂移在服务端 CI 被自动拦截",
+    "双向闭合:服务端 CI 校验自己 wire 符合 schema,客户端 CI 校验其解码器符合同一 schema",
+    "契约真相留在服务端(生产方),CONTRACTS §6 纯 append 升级、冻结归属不破",
+    "建立可被 T4/T5 照抄的生产方持 schema、双端各自 CI 校范式"
+  ],
+  "non_goals": [
+    "不做实时双向(pin 天花板:跨 repo 必 pin 固定版本,客户端漂移最快在客户端 bump pin 时被发现)",
+    "不把契约真相搬到客户端 repo(已淘汰 S3)",
+    "不做 spec→Go/native 生成器(roadmap 硬约束;已淘汰 S4)",
+    "不在本 PRD 实现客户端侧 gate——客户端开站做,本 PRD 只声明依赖(FR9)",
+    "不把错误信封纳入 T3(D7)",
+    "不改 T0-T2 已落地代码、不导出 loginSession",
+    "不新建顶层 contracts/ 目录(避免触 CONTRACTS §1.1 冻结集)"
+  ],
+  "assumptions": [
+    {"id": "A1", "text": "login 和 refresh 当前共用未导出的 loginSession 类型(多路 reviewer 读码确认)", "confidence": "high"},
+    {"id": "A2", "text": "handler 用 json.NewEncoder(w).Encode 写响应(尾随换行 + 默认 HTML 转义),conformance 须匹配此编码路径", "confidence": "high"},
+    {"id": "A3", "text": "客户端 app-infra-toolkit 有 contracts/ 的 JSON Schema 2020-12 惯例,能消费服务端发布的 JSON Schema;客户端 login DTO 手写、严格解码、与服务端形状当前一致", "confidence": "high"},
+    {"id": "A4", "text": "客户端 0.1.0 未发布,跨 repo 只能 git-commit-pin(客户端 pin 服务端 commit 读 schema 文件)", "confidence": "high"}
+  ],
+  "requirements": [
+    {"id": "FR1", "type": "functional", "description": "在服务端 repo 写一份机器可读 schema(JSON Schema 2020-12,匹配客户端 contracts/ 惯例)描述 login 响应 wire,字段名/类型/全字段 required/additionalProperties:false 严格;作为服务端发布的 wire 契约真相。", "priority": "must"},
+    {"id": "FR2", "type": "functional", "description": "schema 覆盖 login 与 refresh 两个响应,按端点独立锚定(即便当前共用 loginSession),防未来分化漏检。", "priority": "must"},
+    {"id": "FR3", "type": "functional", "description": "服务端 conformance 测试(package auth 内)用固定输入构造 DTO 经与 handler 相同的 json.NewEncoder 路径序列化,校验输出符合 schema(字段名/类型/required/拒额外字段);任一结构漂移导致测试失败;删除 schema 文件时测试失败(fail-closed)。", "priority": "must"},
+    {"id": "FR4", "type": "functional", "description": "conformance 测试加值级判别断言,覆盖纯结构 schema 抓不到的语义漂移(expiresAt 用非平凡固定毫秒值使秒↔毫秒被区分;数值字段为 number 非 string)。", "priority": "must"},
+    {"id": "FR5", "type": "functional", "description": "用固定/注入的确定性输入(固定字面 token、固定 expiresAt 毫秒、固定 UUID),不调 CSPRNG token 或 time.Now,保证可重复。", "priority": "must"},
+    {"id": "FR6", "type": "functional", "description": "服务端侧完全自包含——conformance 只用服务端 repo 内 schema + 自己 wire,不引 submodule、不连 DB、不起 HTTP server、不依赖 TEST_DATABASE_URL;被 verify.sh step 3 go test ./... 覆盖,不强制新增独立 step。", "priority": "must"},
+    {"id": "FR7", "type": "functional", "description": "schema 落 internal/modules/auth/contract/(不新建顶层目录、不触 §1.1 冻结集);conformance 测试在 package auth 内(loginSession 未导出);不落 internal/platform 下(不违反依赖方向)。", "priority": "must"},
+    {"id": "FR8", "type": "functional", "description": "docs/CONTRACTS.md §6 纯 append 升级——声明 wire 真相由机器可读 schema 持有(§6 自然语言为人类摘要、schema 为机器可读规范,主从明确)、服务端 CI 校验 wire 符合 schema、客户端在其 CI 消费此 schema 校验解码器、真相源留在服务端;为 append 不需 migration note。", "priority": "must"},
+    {"id": "FR9", "type": "functional", "description": "跨 repo 依赖声明(本 repo 不实现):客户端 app-infra-toolkit 侧前置活——pin/消费服务端 schema + 在客户端 CI 校验其 Kotlin/Swift 解码器接受该 schema 声明的形状——作为依赖记录,owner 明博,客户端开站做。", "priority": "should"},
+    {"id": "NFR1", "type": "non_functional", "description": "schema 严格度 >= 客户端解码器严格度(additionalProperties:false + 全 required),防 schema 比解码器宽导致服务端 append 字段被放过却在客户端炸。", "priority": "must"},
+    {"id": "NFR2", "type": "non_functional", "description": "服务端校验 wire 时针对 Int64 精度用 json.Decoder.UseNumber() 或等价手段,大整数 token/expiresAt 不经 float64 丢精度。", "priority": "must"},
+    {"id": "NFR3", "type": "non_functional", "description": "以最小形态实现,不引入 codegen/生成器,不建 internal/contracts/generated/,不预先抽象跨模块框架(T4/T5 复用时按 rule-of-three 再提取)。", "priority": "must"},
+    {"id": "NFR4", "type": "non_functional", "description": "范式对 T4/T5 为 append 可复用——生产方持 schema 真相、生产方 CI 自校、消费方在其 CI 校验。", "priority": "should"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC1", "description": "Given schema 已 committed,when 运行 go test ./internal/modules/auth,then conformance 测试通过且 internal/modules/auth/contract/ 下存在 login 与 refresh 的 schema。", "verifiable_by": "automated_test", "requirement_refs": ["FR1", "FR2"]},
+    {"id": "AC2", "description": "Given login 与 refresh 各有独立 schema 锚定,when 篡改 refresh schema 一个字段而不动 login,then refresh 的 conformance 断言失败、login 的不失败。", "verifiable_by": "automated_test", "requirement_refs": ["FR2"]},
+    {"id": "AC3", "description": "Given schema 已 committed,when 把 loginSession 某 json struct tag 从 camelCase 改成 snake_case 但不更新 schema,then go test ./... 退出码非 0。", "verifiable_by": "automated_test", "requirement_refs": ["FR3"]},
+    {"id": "AC4", "description": "Given schema 含 additionalProperties:false,when 给 loginSession append 一个未在 schema 声明的字段而不更新 schema,then conformance 测试失败(拒额外字段)。", "verifiable_by": "automated_test", "requirement_refs": ["NFR1", "FR3"]},
+    {"id": "AC5", "description": "Given conformance 测试,when 删除 schema 文件后运行 go test,then 测试失败(读盘报错),而非跳过或通过。", "verifiable_by": "automated_test", "requirement_refs": ["FR3"]},
+    {"id": "AC6", "description": "Given expiresAt 用非平凡固定毫秒值,when 把 UnixMilli 语义改成 Unix(秒)而不更新断言,then 值级判别断言失败。", "verifiable_by": "automated_test", "requirement_refs": ["FR4"]},
+    {"id": "AC7", "description": "Given conformance 测试构造 DTO,when 连续运行 go test -count=5,then 五次一致、无间歇失败。", "verifiable_by": "automated_test", "requirement_refs": ["FR5"]},
+    {"id": "AC8", "description": "Given conformance 测试,when 在未设 TEST_DATABASE_URL 下运行,then 测试通过、不建立 DB 连接、不监听 HTTP 端口、不引入 submodule。", "verifiable_by": "automated_test", "requirement_refs": ["FR6"]},
+    {"id": "AC9", "description": "Given 测试落点,when 审查 T3 改动,then schema 在 internal/modules/auth/contract/ 下、未新建顶层目录、测试在 package auth 内、未导出 loginSession、未落 internal/platform 下。", "verifiable_by": "code_review", "requirement_refs": ["FR7"]},
+    {"id": "AC10", "description": "Given T3 落地后的 docs/CONTRACTS.md §6,when 审查文档,then 含一条 append 说明:wire 真相由机器可读 schema 持有、§6 文字为人类摘要、服务端 CI 校验 wire 符合 schema、客户端在其 CI 校验解码器、真相源留在服务端(非 migration note 级变更)。", "verifiable_by": "code_review", "requirement_refs": ["FR8", "NFR4"]},
+    {"id": "AC11", "description": "Given 跨 repo 依赖,when 审查 PRD/handoff,then 客户端前置活(pin/校验服务端 schema)被显式记为依赖项 + owner 明博,本 PRD 不实现它。", "verifiable_by": "code_review", "requirement_refs": ["FR9"]},
+    {"id": "AC12", "description": "Given Int64 精度,when 服务端校验 wire 的 expiresAt 与 token 字段,then 用 UseNumber 或等价手段,大整数不经 float64 丢精度(反例:不用 UseNumber 时大整数触发精度断言失败)。", "verifiable_by": "automated_test", "requirement_refs": ["NFR2"]},
+    {"id": "AC13", "description": "Given T3 实现完成,when 审查仓库依赖与目录,then 未引入 codegen/生成器、未建 internal/contracts/generated/、helper/schema 工具为 auth 包内局部实现未提前跨模块抽象。", "verifiable_by": "code_review", "requirement_refs": ["NFR3", "NFR4"]}
+  ],
+  "edge_cases": [
+    {"id": "E1", "description": "schema 比客户端真实解码器宽松(忘写 additionalProperties:false)", "expected_behavior": "schema 严格度 >= 解码器,additionalProperties:false + 全 required(AC4)"},
+    {"id": "E2", "description": "用 json.Marshal 而非 handler 的 Encode 路径校验,字节/行为差", "expected_behavior": "conformance 走与 handler 相同 Encode 路径"},
+    {"id": "E3", "description": "Int64 大整数经 float64 丢精度误判", "expected_behavior": "用 UseNumber(AC12)"},
+    {"id": "E4", "description": "单位 ms→s 形状不变", "expected_behavior": "值级判别断言(AC6);token base64 编码、null↔缺字段等残留盲区诚实标注(R4)"},
+    {"id": "E5", "description": "客户端 station 迟迟不开", "expected_behavior": "服务端侧自包含先落地有独立价值;双向的客户端那半作为依赖挂起不阻塞服务端;PRD 明示客户端未开站时只有服务端单向自检生效、双向未闭合"},
+    {"id": "E6", "description": "同源风险——人改 wire 顺手同改 schema 一起漂", "expected_behavior": "conformance 用真实 encode 对 schema + 值级断言,改 wire 蒙混需同时改 schema 且改值断言门槛更高;诚实标注此为 schema-同作者残留同源风险(R2)"},
+    {"id": "E7", "description": "跨平台 checkout 行尾 CRLF", "expected_behavior": "schema/样例文件经 .gitattributes 标 *.json text eol=lf"}
+  ],
+  "risks": [
+    {"id": "R1", "description": "客户端 station 不开/拖延,双向只闭合服务端半边,客户端漂移无 gate", "impact": "medium", "likelihood": "medium", "mitigation": "服务端半边自包含先落地有独立价值;客户端半边作为依赖项明博协调;PRD 明示未闭合状态(E5)", "owner": "Mingbo"},
+    {"id": "R2", "description": "schema 由服务端作者手写,可能比真实 wire 宽或与 wire 同源漂移", "impact": "medium", "likelihood": "medium", "mitigation": "conformance 用真实 encode 对 schema + 值级断言,改 wire 不同步 schema 即红;additionalProperties:false 强制(AC4)", "owner": "engineering"},
+    {"id": "R3", "description": "引入 jsonschema/v6 给极简 go.mod 扩供应链面(传递依赖)", "impact": "low", "likelihood": "low", "mitigation": "Q2 已定用库(D6):依赖已核实=1 直接+少量成熟/官方传递,只测试用不进生产二进制,在 CONTRACTS 申报;实现时 go mod tidy 核实传递面超预期则按 D6 Override 退回手写断言+元测试", "owner": "engineering"},
+    {"id": "R4", "description": "形状 schema 对单位/编码语义失明(ms↔s、base64、null↔缺字段)", "impact": "medium", "likelihood": "medium", "mitigation": "NFR2 值级判别 + 诚实标注残留盲区", "owner": "engineering"},
+    {"id": "R5", "description": "pin 天花板——客户端校验 pinned 服务端 schema 版本,服务端发新 schema 而客户端不 bump pin 则客户端校旧契约", "impact": "low", "likelihood": "medium", "mitigation": "S5 把这一向放客户端 CI(bump pin 是客户端自己纪律),服务端漂移在服务端 CI 实时抓不受 pin 影响;残留窗口仅服务端发新 schema 到客户端 bump 之间", "owner": "Mingbo"},
+    {"id": "R6", "description": "T3 范式被 T4/T5 照抄,缺陷放大", "impact": "medium", "likelihood": "medium", "mitigation": "S5 的生产方持 schema、自校 + 消费方在其 CI 校是干净范式,把同源/宽 schema 反模式写进 PRD 警示", "owner": "engineering"}
+  ],
+  "default_decisions": [
+    {"id": "D1", "decision": "方向锁定为全双向(GA2),明博从单向 GA1 显式推翻升级", "reason": "明博看到单向固有盲区后要双向防漂", "override_if": "明博改回单向则用 GA1 版思路"},
+    {"id": "D2", "decision": "机制选 S5(服务端持 schema 真相 + 两端各自 CI 校验),淘汰 S1/S2/S3/S4", "reason": "明博在契约真相归谁选择题选定服务端持真相;S5 守住服务端对自己输出契约所有权 + §6 冻结不破 + 无反向盲区 + 真双向", "override_if": "明博改选把真相搬客户端(S3)或只要最省(S1)"},
+    {"id": "D3", "decision": "schema 落 internal/modules/auth/contract/,不新建顶层 contracts/", "reason": "避免触 CONTRACTS §1.1 冻结的 5 个顶层目录;§4 允许新增子目录为 append;客户端经 submodule pin 整 repo 仍可读该路径文件", "override_if": "明博要可见顶层 contracts/ 提升可发现性则走 §1.1 migration note"},
+    {"id": "D4", "decision": "§6 为纯 append 升级、真相源留服务端,不走 migration note", "reason": "S5 不外移真相源,§6 从自然语言扩展为自然语言摘要 + 指向机器可读 schema,是 append 不是迁移冻结路径", "override_if": "审查认为指向 schema 构成冻结项结构变更则补 migration note"},
+    {"id": "D5", "decision": "refresh 独立 schema 锚定 + 独立断言(即便当前共用 loginSession)", "reason": "防未来分化漏检,成本近零", "override_if": "确认 refresh 永久复用 login DTO"},
+    {"id": "D6", "decision": "明博 Q2 拍板用现成库:服务端 conformance 用 santhosh-tekuri/jsonschema/v6(v6.0.2,支持 draft 2020-12)加载 schema 文件校验真实 wire,非手写镜像断言;依赖成本已核实=主 go.mod 新增 1 直接(jsonschema/v6)+ 传递(golang.org/x/text 必然,pattern 验证可能引 dlclark/regexp2),均成熟/官方,只测试用不进生产二进制但进 go.mod/go.sum,在 CONTRACTS 申报", "reason": "S5 已强制 schema 文件作为跨语言契约真相存在,用库让服务端自检直接吃这份文件=单一真相零漂移兑现 S5;手写断言会制造第二份真相有漂移风险", "override_if": "实现时 go mod tidy 显示传递依赖面超预期(非官方重依赖)则退回手写字段集+类型断言+元测试断言其与 schema 等价"},
+    {"id": "D7", "decision": "错误信封不纳入 T3", "reason": "已有 envelope_test 跨层比对 + §4 append-only 管住", "override_if": "客户端开始依赖信封 wire 形状"},
+    {"id": "D8", "decision": "schema/helper 为 auth 包内最小局部实现,不预抽象跨模块框架", "reason": "rule-of-three,T4/T5 真复用再提取", "override_if": "T4 落地时提取共享"},
+    {"id": "D9", "decision": "固定样本值用明显占位字面量(固定 UUID/字面 token/固定毫秒 expiresAt),暂不强制对齐客户端 magic 值", "reason": "协调者可给默认;对齐是优化非阻塞", "override_if": "客户端已有占位约定"},
+    {"id": "D10", "decision": "明博 Q1 拍板:服务端 schema 落地后再写客户端交接说明(不现在写提纲),客户端仓库拿真 schema + 本 PRD/handoff 自跑 design-gate 决定开站", "reason": "明博在 Q1 选等 schema 落地再写,避免提纲版返工", "override_if": "客户端团队需提前占位对齐则先出提纲版交接"}
+  ],
+  "open_questions": [],
+  "tasks": [
+    {"id": "T1", "description": "写 login 机器可读 schema(JSON Schema 2020-12,additionalProperties:false,全 required)放 internal/modules/auth/contract/ + 服务端 conformance 测试(package auth,固定输入,真实 Encode 路径,经 santhosh-tekuri/jsonschema/v6 加载 schema 校验 wire 符合 schema 见 D6,删 schema fail-closed)+ .gitattributes 标 *.json eol=lf", "owner_agent": "implementer", "deps": [], "done_when": ["AC1", "AC3", "AC5"]},
+    {"id": "T2", "description": "refresh 独立 schema + 独立断言 + additionalProperties:false 拒额外字段断言", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC2", "AC4"]},
+    {"id": "T3", "description": "值级判别断言(ms↔s 反例)+ 确定性固定输入 + UseNumber 防 Int64 丢精度", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC6", "AC7", "AC12"]},
+    {"id": "T4", "description": "保证服务端侧自包含(无 submodule/DB/HTTP,不依赖 TEST_DATABASE_URL),被 verify.sh step 3 覆盖", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC8"]},
+    {"id": "T5", "description": "docs/CONTRACTS.md §6 纯 append 升级 + 目录树登记 contract/ 落点", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC10"]},
+    {"id": "T6", "description": "把客户端前置活(pin/校验服务端 schema)记为跨 repo 依赖项 + owner 明博,明确本 PRD 不实现;服务端 schema 落地后产出客户端交接说明(见 D10)", "owner_agent": "main_coordinator", "deps": [], "done_when": ["AC11"]},
+    {"id": "T7", "description": "审查落点/依赖方向/未导出符号未导出/无 codegen/无 generated 目录/无跨模块过早抽象", "owner_agent": "reviewer", "deps": ["T1", "T2", "T3", "T4", "T5"], "done_when": ["AC9", "AC13"]}
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/t3-contract-reconciliation/prd.md",
+    "handoff": "product-requirements/t3-contract-reconciliation/handoff.json"
+  },
+  "next_prompt": "用本 handoff 落地 T3 全双向契约对账的服务端半边(S5):按 T1-T7 实现机器可读 schema(internal/modules/auth/contract/,additionalProperties:false,全 required,覆盖 login+refresh)+ 服务端 conformance 测试(package auth,固定输入,真实 json.NewEncoder 路径,经 santhosh-tekuri/jsonschema/v6 加载 schema 校验 wire 符合 schema,删 schema fail-closed,UseNumber 防 Int64 丢精度,ms↔s 值级反例)+ CONTRACTS §6 纯 append 升级。服务端侧自包含、无 submodule、被 verify.sh step 3 覆盖。完成判据 bash scripts/verify.sh 退出码 0。Q2 已定:用 santhosh-tekuri/jsonschema/v6(D6),实现时 go mod tidy 核实传递依赖面。客户端半边(FR9)是跨 repo 依赖,本 PRD 不实现;Q1 已定:服务端 schema 落地后产出客户端交接说明,客户端仓库拿真 schema 自跑 design-gate(D10)。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": ["codebase-scan", "client-scout", "option-conservative", "option-fast", "option-longterm", "requirement", "redteam", "implementation", "architecture"],
+    "codex_used": true,
+    "codex_downgraded": false
+  }
+}
