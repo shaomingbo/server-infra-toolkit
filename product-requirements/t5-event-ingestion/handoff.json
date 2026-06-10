@@ -1,0 +1,130 @@
+{
+  "slug": "t5-event-ingestion",
+  "source_type": "idea",
+  "mode": "L1",
+  "title": "T5 事件接收(接缝先行 · 服务端自包含,公网暴露后置)",
+  "summary": "给 server-infra-toolkit 新增 observability 事件接收模块的服务端半边:POST /v1/events 批量接收 Envelope 数组 → 入站 JSON Schema 校验 → 按事件级稳定 id 幂等去重 → 单事务批量落 Neon 新表。账单硬天花板放 DB/请求体侧(请求体大小+单批条数+保留周期),独立于 max-instances;限流/认证为接缝(挂点就位但端点默认挂 feature flag 后、不公网暴露)。T3 范式按入站方向投影:服务端持「接受形状」schema,conformance 测 handler 拒绝畸形输入而非自校响应。清理执行划 T7,客户端接入为后续轻量增量。",
+  "goal_alignment": {
+    "status": "clear",
+    "target_user": "服务端 + 服务端 CI(收-验-存-幂等链路自检);客户端 app-infra-toolkit 为后续接入方;直接操作者明博",
+    "problem": "客户端需要把 observability 事件批量上报到服务端,但当前无接收端点、无入站校验、无防滥用/防重/保留机制;且客户端 0.1.0 未发布,现在就暴露公网写库端点是无正当流量的攻击面",
+    "success_outcome": "服务端事件接收模块完整落地(批量端点 + 入站 schema 校验 + 幂等 + 限流接缝 + 账单硬上限 + 保留周期字段),集成测试覆盖收-验-存-幂等;端点默认不挂公网(feature flag 后置),认证/限流最后一公里待客户端接入定",
+    "scope_boundary": "服务端侧 = 收-验-存-幂等-硬上限-保留字段 + 入站契约 schema + 客户端接入交接;不做公网暴露/真实认证(待客户端接入)、查询/可视化/告警、外部队列/流处理/事件总线、保留清理执行(划 T7)、客户端实现",
+    "first_acceptance_signal": "给批量端点发一个含越闭集枚举 AttributeValue 的 Envelope 批次,服务端经真实 handler 校验路径返回 4xx 标准错误信封且该批零事件落库",
+    "confidence": "high",
+    "alternatives_considered": []
+  },
+  "goals": [
+    "observability 事件接收链路服务端侧完整:批量端点收 Envelope 数组 → 入站 schema 校验 → 幂等去重 → 落 Neon 新表",
+    "防滥用/成本硬天花板就位:请求体大小 + 单批条数 + 保留周期三道硬上限,独立于实例数",
+    "T3 范式正确投影到入站方向:服务端持「接受形状」schema,conformance 测 handler 拒绝畸形输入(非自校响应)",
+    "接缝先行:限流 facade + 认证挂点 + 保留清理触发点就位但不实装公网暴露,等客户端接入翻开",
+    "客户端接入交接物产出(端点 + Envelope schema + 批量上限 + 幂等键约定 + 待定认证),客户端据此评估接入"
+  ],
+  "non_goals": [
+    "不公网暴露端点 / 不实装真实认证——待客户端 0.1.0 接入时定(本 PRD 留 feature flag + 认证挂点)",
+    "不实现保留清理执行——划 T7(本 PRD 只建保留周期字段 + 时间友好表结构,让 T7 清理是 O(1) drop)",
+    "不做事件查询/检索/可视化/告警——只接收落库,不提供读端",
+    "不引入外部消息队列(Kafka/PubSub/SQS)/流处理/通用事件总线/订阅分发/dead-letter/重投",
+    "不做多租户隔离",
+    "不实现客户端侧上报代码(跨 repo,客户端开站做)",
+    "不把 T5 Envelope/批量 wire 纳入 CONTRACTS frozen 集——客户端未发布,wire 暂 unstable,真实消费后才冻结",
+    "不接收 PII/自由文本属性——AttributeValue 闭集枚举不含自由文本/用户标识字段"
+  ],
+  "assumptions": [
+    {"id": "A1", "text": "客户端 Envelope wire 形状当前不在本 repo,只有散文线索(Envelope model、AttributeValue 闭集枚举、hold-and-retry、traceId);T5 服务端定「接受形状」schema 作为入站契约真相(与 T3 真相源留服务端一致),客户端为生产方但消费此 schema", "confidence": "medium"},
+    {"id": "A2", "text": "客户端事件级有稳定 id 可作幂等键;若无,服务端按规范化内容哈希兜底", "confidence": "medium"},
+    {"id": "A3", "text": "模块脚手架照 auth 先例:Handler{db} + NewHandler(pool) + RegisterRoutes(mux),经 NewServer 的 registrar-callback 挂接,cmd/api/main.go 唯一 wiring,编译期 var _ 守卫", "confidence": "high"},
+    {"id": "A4", "text": "RateLimiter facade 是 auth 包私有、shape 未冻结(注释明示 MAY be reshaped);T5 是第一个真实消费者,可决定提升 platform 或各模块各自留 facade", "confidence": "high"}
+  ],
+  "requirements": [
+    {"id": "FR1", "type": "functional", "description": "批量接收端点 POST /v1/events(/v1/ 业务前缀下),接收 Envelope JSON 数组;端点经 registrar-callback 挂接,默认在 feature flag(env)后,未启用时不挂公网路由", "priority": "must"},
+    {"id": "FR2", "type": "functional", "description": "入站 schema 校验:用 internal/modules/observability/contract/ 下的机器可读 JSON Schema(draft 2020-12,additionalProperties:false,必填字段 required,AttributeValue 闭集枚举)校验每条 Envelope,handler 真实校验路径拒绝畸形 Envelope", "priority": "must"},
+    {"id": "FR3", "type": "functional", "description": "幂等去重:按事件级稳定 id 的 (source,event_id) 复合唯一约束去重,客户端 hold-and-retry 重发同批不产生重复落库;重复事件静默跳过(ON CONFLICT DO NOTHING)", "priority": "must"},
+    {"id": "FR4", "type": "functional", "description": "批量落库:有效事件单事务批量插入 Neon 新表(00003_ 迁移 + sqlc 生成 query),尊重连接池上限,单请求不按事件数 fan-out 连接", "priority": "must"},
+    {"id": "FR5", "type": "functional", "description": "账单硬上限(独立于实例数):MaxBytesReader 限请求体大小 + 单批最大条数 + 单事件/字段最大长度,三道硬天花板在读取早期拒绝(413/400),不靠 max-instances 兜底存储/写放大账单", "priority": "must"},
+    {"id": "FR6", "type": "functional", "description": "保留周期字段就位:事件表带 received_at + 时间友好结构(便于 T7 按时间 drop),保留周期作为字段/约定定义;清理执行划 T7,本 PRD 不实现 DELETE 路径", "priority": "must"},
+    {"id": "FR7", "type": "functional", "description": "限流接缝:对齐 auth 的 RateLimiter Allow(ctx,key) 接口形状,T5 端点挂限流接缝(可 no-op),诚实标注进程内限流非安全边界(scale-zero 下最坏 2x + 冷启动重置);真实限流策略待公网暴露时定", "priority": "should"},
+    {"id": "FR8", "type": "functional", "description": "入站契约 conformance 测试(package observability 内):正例(合法 Envelope 批经真实 handler 接受)+ 负例(缺必填/多字段/越闭集枚举/类型错经真实 handler 被拒,各一条证明 additionalProperties/required/type/enum 真的咬);删 schema 文件 fail-closed", "priority": "must"},
+    {"id": "FR9", "type": "functional", "description": "错误信封 append:T5 新增/复用错误 code(payload_too_large / bad_request / rate_limited / 复用 unauthorized),信封顶层结构 {error:{code,message},requestId} 不变,CONTRACTS append T5 范围声明", "priority": "must"},
+    {"id": "FR10", "type": "functional", "description": "部分成功语义:整批 schema 校验,坏条不毒化整批的不变量钉死;响应给 accepted/duplicate/rejected 计数(不用 207 逐条,降低对未发布客户端的协议假设)", "priority": "must"},
+    {"id": "FR11", "type": "functional", "description": "客户端接入交接物:产出 client-handoff(端点路径 + Envelope schema 路径 + 批量上限 + 幂等键约定 + 待定认证),客户端据此评估接入,owner 明博,本 PRD 不实现客户端侧", "priority": "should"},
+    {"id": "FR12", "type": "functional", "description": "自身遥测走 stdout:事件接收模块自身运行日志/指标只走 slog JSON stdout(沿用 T0 范式),绝不回写 events 表,防递归/放大", "priority": "must"},
+    {"id": "NFR1", "type": "non_functional", "description": "scale-to-zero 兼容:不引入常驻进程/in-process cron;限流不依赖跨实例强一致;启动不碰 DB(对齐 /livez 契约)", "priority": "must"},
+    {"id": "NFR2", "type": "non_functional", "description": "自包含可测:单元测试(schema 校验/批量上限/信封/限流接缝,fake store + 注入时钟)无 TEST_DATABASE_URL 仍绿;幂等/批量事务语义走集成测试(TEST_DATABASE_URL 容器,本地 skip);被 verify.sh 覆盖", "priority": "must"},
+    {"id": "NFR3", "type": "non_functional", "description": "冻结契约不破:/v1/ 业务前缀、错误信封 append-only 顶层不变、依赖方向(platform 不 import http/modules;http 不 import 本模块;本模块不 import auth)、模块本地渲染错误信封不调 http.WriteError", "priority": "must"},
+    {"id": "NFR4", "type": "non_functional", "description": "迁移纪律:00003_ 五位零填充、Up/Down 两段、schema 单一真相源、生产前滚不回退、破坏性 Down 标 IRREVERSIBLE;新表 + sqlc gen 过 verify.sh 漂移 gate 与迁移 round-trip", "priority": "must"},
+    {"id": "NFR5", "type": "non_functional", "description": "隐私边界:AttributeValue 闭集枚举不含自由文本/用户标识;事件载荷视为可公开遥测,客户端侧负责脱敏;公开仓库 schema 即公开遥测字段设计,接受此", "priority": "should"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC1", "description": "Given 模块落地,when 运行 go test ./internal/modules/observability,then conformance 测试通过且 contract/ 下存在 Envelope 入站 schema 文件", "verifiable_by": "automated_test", "requirement_refs": ["FR2", "FR8"]},
+    {"id": "AC2", "description": "Given 入站 schema 含 additionalProperties:false 与 AttributeValue 闭集枚举,when 给端点发一个含越枚举 AttributeValue 的 Envelope 批,then handler 经真实校验路径返回 4xx 标准错误信封且该批零事件落库", "verifiable_by": "automated_test", "requirement_refs": ["FR2", "FR8", "FR10"]},
+    {"id": "AC3", "description": "Given 事件表 (source,event_id) 唯一约束,when 同一批含相同 (source,event_id) 的请求连发 N 次,then 该事件在 events 表的行数等于 1", "verifiable_by": "automated_test", "requirement_refs": ["FR3"]},
+    {"id": "AC4", "description": "Given 批量校验,when 一批 100 条中夹 1 条违反 schema 的 Envelope,then 整批返回 4xx 且 events 表零新增、响应报告 rejected 计数(坏条不被静默吞、不毒化整批)", "verifiable_by": "automated_test", "requirement_refs": ["FR10", "FR2"]},
+    {"id": "AC5", "description": "Given 请求体硬上限,when 发送超过 MaxBytesReader 上限的请求体,then 在读满前返回 413 且进程内存不被打满", "verifiable_by": "automated_test", "requirement_refs": ["FR5"]},
+    {"id": "AC6", "description": "Given 单批条数上限,when 发送条数超上限的批,then 返回 413 或 400 且零落库", "verifiable_by": "automated_test", "requirement_refs": ["FR5"]},
+    {"id": "AC7", "description": "Given conformance 测试 fail-closed,when 删除入站 schema 文件后运行 go test,then 测试失败(读盘报错),而非跳过或通过", "verifiable_by": "automated_test", "requirement_refs": ["FR8"]},
+    {"id": "AC8", "description": "Given 依赖方向,when 运行 go list -deps ./internal/http 与 ./internal/modules/observability,then internal/http 不含 observability、observability 不含 internal/http、不含 internal/modules/auth(认证挂点只在 cmd/api)", "verifiable_by": "code_review", "requirement_refs": ["NFR3"]},
+    {"id": "AC9", "description": "Given 端点默认不公网暴露,when 审查 cmd/api 路由注册,then observability 端点挂在 feature flag(env)后、未启用时不注册公网路由,且 PRD/CONTRACTS 明示这是接缝先行的有意状态", "verifiable_by": "code_review", "requirement_refs": ["FR1"]},
+    {"id": "AC10", "description": "Given 自包含测试,when 在未设 TEST_DATABASE_URL 下运行 go test ./internal/modules/observability,then 单元测试通过、不建 DB 连接、不监听端口;幂等/批量事务断言在 integration_test 中(本地 skip,CI 容器跑)", "verifiable_by": "automated_test", "requirement_refs": ["NFR2"]},
+    {"id": "AC11", "description": "Given 新表迁移,when verify.sh 跑 sqlc 漂移 gate 与迁移 round-trip,then 00003_ 迁移加重新生成的 gen/ 无漂移、迁移从 version 0 round-trip 通过", "verifiable_by": "automated_test", "requirement_refs": ["FR4", "NFR4"]},
+    {"id": "AC12", "description": "Given 错误信封 append,when 审查 T5 的 4xx 响应与 CONTRACTS,then 每个 4xx 的 error.code 属 PRD 列举枚举、信封顶层结构 git diff 无顶层 shape 改动、CONTRACTS 有 T5 范围声明", "verifiable_by": "code_review", "requirement_refs": ["FR9", "NFR3"]},
+    {"id": "AC13", "description": "Given 自身遥测,when 审查事件接收 handler 路径,then 不产生对 events 表的自我遥测写入,接收统计仅以 slog JSON 出现在 stdout", "verifiable_by": "code_review", "requirement_refs": ["FR12"]},
+    {"id": "AC14", "description": "Given 客户端接入,when 审查交接物,then client-handoff 含端点路径 + Envelope schema 路径 + 批量上限 + 幂等键约定 + 待定认证,且本 PRD 不实现客户端侧", "verifiable_by": "code_review", "requirement_refs": ["FR11"]},
+    {"id": "AC15", "description": "Given wire 暂不冻结,when 审查 CONTRACTS frozen 集,then 不含 T5 Envelope/批量端点 wire,PRD 显式声明 T5 对端契约处 unstable 阶段", "verifiable_by": "code_review", "requirement_refs": ["NFR3"]},
+    {"id": "AC16", "description": "Given 保留周期字段,when 审查事件表 schema 与代码,then 表带 received_at 与按时间分区或排序的结构、无 DELETE/清理代码路径(清理划 T7)、PRD non-goal 明示 T5 不清理", "verifiable_by": "code_review", "requirement_refs": ["FR6", "NFR1"]}
+  ],
+  "edge_cases": [
+    {"id": "E1", "description": "越闭集枚举的 AttributeValue", "expected_behavior": "整批 4xx,零落库(AC2)"},
+    {"id": "E2", "description": "客户端用随机幂等键灌重复语义事件", "expected_behavior": "幂等键用事件级稳定 id;随机键绕过则倚赖账单硬上限兜底(FR5),文档标注规范化内容哈希为更强兜底选项(D5 Override)"},
+    {"id": "E3", "description": "超大单条(巨型 attribute)vs 超多条(微事件刷行)", "expected_behavior": "请求体 + 条数 + 单字段三道独立上限(FR5/AC5/AC6),读取早期拒绝"},
+    {"id": "E4", "description": "端点被灌爆后服务缩零", "expected_behavior": "清理不依赖持续流量(划 T7 外部触发);T5 期不公网暴露故无真实灌爆面(接缝先行)"},
+    {"id": "E5", "description": "内存限流在缩零/多实例下失效", "expected_behavior": "诚实标注非安全边界,账单天花板靠 DB/请求体硬上限不靠限流(FR5/FR7)"},
+    {"id": "E6", "description": "事件混入 PII/设备指纹", "expected_behavior": "schema 闭集枚举不含自由文本/用户标识(NFR5),保留周期对齐用户数据保守原则"},
+    {"id": "E7", "description": "pgx CopyFrom 不支持 ON CONFLICT 与幂等冲突", "expected_behavior": "用 INSERT...ON CONFLICT DO NOTHING(单语句/数组参数),不用 CopyFrom"},
+    {"id": "E8", "description": "批次部分重复(已落库事件与新事件混批)", "expected_behavior": "ON CONFLICT 静默跳过已存在、新事件落库,响应 accepted/duplicate 计数(AC3/FR10)"}
+  ],
+  "risks": [
+    {"id": "R1", "description": "认证模型待定,公网暴露时若选错(匿名 vs ingest token vs Bearer)影响限流/数据模型", "impact": "medium", "likelihood": "medium", "mitigation": "接缝先行,暴露前不承担风险;认证挂点 + 限流接缝就位,暴露时定最后一公里(D2)", "owner": "Mingbo"},
+    {"id": "R2", "description": "照抄 T3 范式方向反转,照搬会写假绿测试(服务端自校它从不产出的 Envelope)", "impact": "medium", "likelihood": "medium", "mitigation": "PRD 显式定为入站校验契约,conformance 负例走真实 handler 拒绝路径(D3)", "owner": "engineering"},
+    {"id": "R3", "description": "成本封顶维度错位:max-instances=2 封 CPU 不封 Neon 存储/写放大账单", "impact": "medium", "likelihood": "low", "mitigation": "账单天花板放 DB/请求体硬上限,独立于实例数(FR5/D4)", "owner": "engineering"},
+    {"id": "R4", "description": "T5 期表无界增长(清理划 T7)", "impact": "low", "likelihood": "medium", "mitigation": "暂不公网暴露=无真实流量,表增长非问题;时间友好表结构让 T7 清理 O(1);文档标增长上界", "owner": "engineering"},
+    {"id": "R5", "description": "Envelope wire 在客户端未发布时过早冻结违反 roadmap NFR6", "impact": "medium", "likelihood": "medium", "mitigation": "T5 wire 标 unstable 不进 frozen 集,golden fixture 吸收,客户端消费后冻结(D9)", "owner": "engineering"},
+    {"id": "R6", "description": "幂等去重表/事件表自身成无界增长面", "impact": "low", "likelihood": "low", "mitigation": "幂等键用事件表内唯一约束(非独立去重表),去重窗口=保留周期同表副产品(D5)", "owner": "engineering"},
+    {"id": "R7", "description": "隐私/PII 入库撞 CONTRACTS 用户数据保守域,公开仓库使遥测 schema 公开", "impact": "medium", "likelihood": "medium", "mitigation": "闭集枚举挡自由文本,事件视为可公开遥测、客户端脱敏,保留周期对齐用户数据保守(NFR5/D2 暴露后置降低面)", "owner": "Mingbo"}
+  ],
+  "default_decisions": [
+    {"id": "D1", "decision": "目标方向 = T5 事件接收(roadmap §7.1 锁定),服务端自包含先行", "reason": "roadmap ROI 排序 + 明博本 session 在剩余三站中选定 T5 进 forge", "override_if": "明博改选别站"},
+    {"id": "D2", "decision": "明博拍板:认证/暴露策略 = 接缝先行·暂不公网暴露——服务端逻辑完整落地加集成测试,端点挂 feature flag 后默认不公网,认证/限流最后一公里待客户端接入定", "reason": "明博在 R3 选择题选定;客户端 0.1.0 未发布,暴露公网写库端点是无正当流量攻击面,接缝先行让该风险归零且不阻塞服务端落地", "override_if": "明博要现在就公网可用(则按共享 ingest token + DB 硬上限或复用 T2 Bearer 重做认证层)"},
+    {"id": "D3", "decision": "T3 范式方向反转纠正:T5 服务端持「接受形状」入站 schema,conformance 测 handler 拒绝畸形输入(非自校响应)", "reason": "T5 服务端是消费方非生产方,照抄 T3 自校会写假绿测试(测一个服务端从不产出的码路)", "override_if": "决定锚客户端 spec 而非服务端持入站 schema(需 Q1 跨 repo 引用能力)"},
+    {"id": "D4", "decision": "账单硬天花板放 DB/请求体侧(请求体 + 条数 + 保留期),限流仅软削峰且诚实标注非安全边界", "reason": "max-instances 封 CPU 不封存储/写放大账单;进程内限流在 scale-zero 下最坏 2x + 冷启动重置", "override_if": "把限流下沉到边缘层/网关(可归 T6 部署加固)"},
+    {"id": "D5", "decision": "幂等键 = 事件级稳定 id 的 (source,event_id) 唯一约束(事件表内,非独立去重表),去重窗口=保留周期", "reason": "模块自包含可独立删除;内容哈希会把合法重发(时间戳微差)误判为新事件", "override_if": "客户端无稳定事件 id,则退规范化内容哈希兜底"},
+    {"id": "D6", "decision": "保留清理执行划 T7,T5 只建保留周期字段 + 时间友好表结构", "reason": "scale-zero 无常驻进程;请求时惰性清理塞热路径且不保证执行,部署时清理违反迁移只改 schema/启动不碰 DB 双契约", "override_if": "T5 期就需清理,则加 Cloud Scheduler 触发的 GC 端点把 T7 最小支撑就近拉入"},
+    {"id": "D7", "decision": "限流接缝对齐 auth 的 Allow(ctx,key) 形状,是否提升 platform 留实现期定;暂不强行统一三处限流策略", "reason": "rule-of-three;auth 锁定/T5 事件风暴/T4 下载语义不同,强统一会逼通用层背三套策略", "override_if": "实现期发现接口可干净共享且策略可参数化"},
+    {"id": "D8", "decision": "批量响应给 accepted/duplicate/rejected 计数,不用 207 逐条;坏条不毒化整批不变量钉死", "reason": "降低对未发布客户端的协议假设;全拒会让 hold-and-retry 无限重投含毒批", "override_if": "客户端发布后需逐条结果协议"},
+    {"id": "D9", "decision": "Envelope/批量 wire 暂不进 CONTRACTS frozen 集,标 unstable + golden fixture", "reason": "roadmap NFR6:对端契约先 unstable、真实消费验证后才 frozen,防过早固化错误设计", "override_if": "客户端发布并消费后冻结 T5 wire"},
+    {"id": "D10", "decision": "模块脚手架照 auth 先例(Handler/NewHandler/RegisterRoutes,registrar-callback,main 唯一 wiring,编译期 var _ 守卫),错误信封模块本地渲染", "reason": "复用冻结范式,守依赖方向(platform←http←modules,模块不 import http)", "override_if": "无"}
+  ],
+  "open_questions": [],
+  "tasks": [
+    {"id": "T1", "description": "入站 Envelope schema(internal/modules/observability/contract/,draft 2020-12,additionalProperties:false,AttributeValue 闭集枚举)+ conformance 测试(package observability,正例 handler 接受 + 负例 handler 拒绝四种漂移,删 schema fail-closed)+ 模块脚手架(Handler/NewHandler/RegisterRoutes,registrar-callback,依赖方向守卫测试)", "owner_agent": "implementer", "deps": [], "done_when": ["AC1", "AC2", "AC7", "AC8", "AC15"]},
+    {"id": "T2", "description": "00003_ 迁移建 events 表((source,event_id) 唯一约束、received_at、时间友好结构)+ sqlc 批量 upsert query(INSERT...ON CONFLICT DO NOTHING)+ 过 verify.sh 漂移与 round-trip gate", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC3", "AC11"]},
+    {"id": "T3", "description": "handler:批量 schema 校验 → 单事务幂等落库 → accepted/duplicate/rejected 计数响应;集成测试(幂等/批量事务,TEST_DATABASE_URL)+ 单测(校验/信封,fake store)", "owner_agent": "implementer", "deps": ["T1", "T2"], "done_when": ["AC2", "AC4", "AC10"]},
+    {"id": "T4", "description": "账单硬上限(MaxBytesReader + 条数 + 字段长度,读取早期拒绝)+ 限流接缝(Allow 形状,可 no-op,标注非安全边界)+ feature flag 挂点(默认不公网)+ 错误信封 append code + 自身遥测走 stdout", "owner_agent": "implementer", "deps": ["T1", "T3"], "done_when": ["AC5", "AC6", "AC9", "AC12", "AC13"]},
+    {"id": "T5", "description": "保留周期字段 + 时间友好表结构就位,无 DELETE 代码路径(清理划 T7),non-goal 文档明示 T5 不清理", "owner_agent": "implementer", "deps": ["T2", "T3"], "done_when": ["AC16"]},
+    {"id": "T6", "description": "docs/CONTRACTS.md append T5 范围声明(新 error code、入站契约范式、wire 暂不冻结 unstable、依赖方向、模块落点)", "owner_agent": "implementer", "deps": ["T1", "T4"], "done_when": ["AC12", "AC15"]},
+    {"id": "T7", "description": "客户端接入交接物 client-handoff.md(端点路径 + Envelope schema 路径 + 批量上限 + 幂等键约定 + 待定认证),明确本 PRD 不实现客户端侧,owner 明博", "owner_agent": "main_coordinator", "deps": ["T1", "T3", "T4"], "done_when": ["AC14"]},
+    {"id": "T8", "description": "审查:依赖方向/端点未公网暴露/自身遥测不回写 events 表/wire 未进 frozen 集/无跨模块过早抽象/错误信封 append-only", "owner_agent": "reviewer", "deps": ["T1", "T2", "T3", "T4", "T5", "T6"], "done_when": ["AC8", "AC9", "AC13", "AC15"]}
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/t5-event-ingestion/prd.md",
+    "handoff": "product-requirements/t5-event-ingestion/handoff.json"
+  },
+  "next_prompt": "用本 handoff 落地 T5 事件接收的服务端半边(接缝先行):按 T1-T8 实现 internal/modules/observability 模块——POST /v1/events 批量端点(默认挂 feature flag 后不公网暴露)+ 入站 Envelope JSON Schema(contract/,additionalProperties:false,AttributeValue 闭集枚举)+ conformance 测试(测 handler 拒绝畸形输入,非自校响应,删 schema fail-closed)+ 00003_ 迁移建 events 表((source,event_id) 唯一约束防重 + received_at)+ sqlc 批量 ON CONFLICT DO NOTHING upsert + 单事务批量落库 + accepted/duplicate/rejected 计数响应 + 账单硬上限(MaxBytesReader+条数+字段长度)+ 限流接缝(Allow 形状,标注非安全边界)+ 自身遥测走 stdout + CONTRACTS append。模块脚手架照 auth 先例,守依赖方向(模块不 import http/auth,认证挂点只在 cmd/api),错误信封模块本地渲染。自包含:单测无 TEST_DATABASE_URL 仍绿,幂等/批量事务走集成测试。完成判据 bash scripts/verify.sh 退出码 0。保留清理执行划 T7、客户端侧不实现(交接见 client-handoff.md)、T5 wire 暂不进 CONTRACTS frozen 集。明博已拍板 D2:接缝先行不公网暴露,认证/限流最后一公里待客户端接入定。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": ["codebase-scan", "requirement", "redteam", "implementation", "architecture"],
+    "codex_used": false,
+    "codex_downgraded": false
+  }
+}
