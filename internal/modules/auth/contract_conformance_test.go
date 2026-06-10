@@ -96,6 +96,11 @@ func compileSchema(t *testing.T, name string) *jsonschema.Schema {
 	}
 
 	c := jsonschema.NewCompiler()
+	// Turn "format" from an annotation into an assertion: jsonschema/v6 treats
+	// format as annotation-only by default (collect, don't enforce), so without
+	// this the schema's format:"uuid" would never reject a malformed userId. The
+	// negative case below proves this bites.
+	c.AssertFormat()
 	// Register the schema under its file path and compile by the same URL.
 	if err := c.AddResource(path, doc); err != nil {
 		t.Fatalf("add schema resource %s: %v", path, err)
@@ -229,6 +234,45 @@ func TestLoginConformance(t *testing.T) {
 	if err := sch.Validate(typedInst); err == nil {
 		t.Fatal("login schema accepted a string expiresAt — type:integer is not enforcing (schema written too loose)")
 	}
+
+	// Negative case: a userId that is NOT a UUID must be rejected, proving the
+	// schema's format:"uuid" actually bites under AssertFormat. If format were
+	// left annotation-only (or the keyword dropped), this would pass and a client
+	// pinning a UUID-shaped id would silently accept garbage.
+	badUUID := map[string]any{
+		"userId":       "not-a-uuid",
+		"accessToken":  fixedAccessToken,
+		"refreshToken": fixedRefreshToken,
+		"expiresAt":    fixedExpiresAtMs,
+	}
+	badUUIDWire := encodeWire(t, badUUID)
+	badUUIDInst, err := jsonschema.UnmarshalJSON(bytes.NewReader(badUUIDWire))
+	if err != nil {
+		t.Fatalf("decode bad-uuid instance: %v", err)
+	}
+	if err := sch.Validate(badUUIDInst); err == nil {
+		t.Fatal("login schema accepted a non-UUID userId — format:uuid is not enforcing (AssertFormat missing or schema too loose)")
+	}
+
+	// Negative case: an expiresAt that is a Unix SECONDS value (1748563200, the
+	// seconds truncation of the fixed ms literal) must be rejected, proving the
+	// schema's minimum:1000000000000 actually bites. A seconds value is ~1000x
+	// too small, so a ms↔s unit regression on the wire would fail this floor and
+	// be caught at the schema, not just the value-level assertion.
+	seconds := map[string]any{
+		"userId":       fixedUserID,
+		"accessToken":  fixedAccessToken,
+		"refreshToken": fixedRefreshToken,
+		"expiresAt":    int64(1748563200),
+	}
+	secondsWire := encodeWire(t, seconds)
+	secondsInst, err := jsonschema.UnmarshalJSON(bytes.NewReader(secondsWire))
+	if err != nil {
+		t.Fatalf("decode seconds-value instance: %v", err)
+	}
+	if err := sch.Validate(secondsInst); err == nil {
+		t.Fatal("login schema accepted a seconds-value expiresAt — minimum:1000000000000 is not enforcing (schema too loose; a ms↔s regression would slip)")
+	}
 }
 
 // TestRefreshConformance validates the refresh success wire against
@@ -299,5 +343,44 @@ func TestRefreshConformance(t *testing.T) {
 	}
 	if err := sch.Validate(typedInst); err == nil {
 		t.Fatal("refresh schema accepted a string expiresAt — type:integer is not enforcing (schema written too loose)")
+	}
+
+	// Negative case: a userId that is NOT a UUID must be rejected, proving the
+	// schema's format:"uuid" actually bites under AssertFormat. If format were
+	// left annotation-only (or the keyword dropped), this would pass and a client
+	// pinning a UUID-shaped id would silently accept garbage.
+	badUUID := map[string]any{
+		"userId":       "not-a-uuid",
+		"accessToken":  fixedAccessToken,
+		"refreshToken": fixedRefreshToken,
+		"expiresAt":    fixedExpiresAtMs,
+	}
+	badUUIDWire := encodeWire(t, badUUID)
+	badUUIDInst, err := jsonschema.UnmarshalJSON(bytes.NewReader(badUUIDWire))
+	if err != nil {
+		t.Fatalf("decode bad-uuid instance: %v", err)
+	}
+	if err := sch.Validate(badUUIDInst); err == nil {
+		t.Fatal("refresh schema accepted a non-UUID userId — format:uuid is not enforcing (AssertFormat missing or schema too loose)")
+	}
+
+	// Negative case: an expiresAt that is a Unix SECONDS value (1748563200, the
+	// seconds truncation of the fixed ms literal) must be rejected, proving the
+	// schema's minimum:1000000000000 actually bites. A seconds value is ~1000x
+	// too small, so a ms↔s unit regression on the wire would fail this floor and
+	// be caught at the schema, not just the value-level assertion.
+	seconds := map[string]any{
+		"userId":       fixedUserID,
+		"accessToken":  fixedAccessToken,
+		"refreshToken": fixedRefreshToken,
+		"expiresAt":    int64(1748563200),
+	}
+	secondsWire := encodeWire(t, seconds)
+	secondsInst, err := jsonschema.UnmarshalJSON(bytes.NewReader(secondsWire))
+	if err != nil {
+		t.Fatalf("decode seconds-value instance: %v", err)
+	}
+	if err := sch.Validate(secondsInst); err == nil {
+		t.Fatal("refresh schema accepted a seconds-value expiresAt — minimum:1000000000000 is not enforcing (schema too loose; a ms↔s regression would slip)")
 	}
 }
