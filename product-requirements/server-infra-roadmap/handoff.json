@@ -6,7 +6,7 @@
   "summary": "对标客户端基础设施 app-infra-toolkit,为服务端梳理一份按 ROI 排序的中期 ROADMAP(mode L2)。服务端定为独立新 repo server-infra-toolkit(Go + 模块化单体 + Postgres/Neon + Cloud Run)。目标是让明博逐个开 PRD 把模块落地,并在第一站一次性定下轻量目录/CI 约定,避免事后专门起一个迭代补目录/CI。ROADMAP 以 T0 线上最小闭环开头,依次推进数据接入层、auth、契约对账、离线包、事件接收、部署加固,并把运营与商业化能力列为按业务触发的 backlog。",
   "goal_alignment": {
     "status": "clear",
-    "target_user": "明博——预备独立开发者,单人开发加 AI 杠杆,熟 Node.js、Go 新手,已为客户端建有 app-infra-toolkit 基础设施。",
+    "target_user": "维护者(单人开发加 AI 协作),已为客户端建有 app-infra-toolkit 基础设施。",
     "problem": "客户端有 app-infra-toolkit 基础设施,服务端是空白;缺一份按 ROI 排序、可逐个开 PRD 落地的服务端基础设施 ROADMAP,且不希望像客户端那样事后专门起一个迭代去补目录与 CI。",
     "success_outcome": "产出一份按 ROI 排序的服务端基础设施模块 ROADMAP(每项可独立开 PRD 落地),并在第一站一次性定下轻量目录与 CI 约定,后续模块接入不需要专门起迭代梳理目录或 CI。",
     "scope_boundary": "范围=服务端基础设施套件的中期 ROADMAP(模块清单、ROI 排序、依赖结构、目录与 CI 约定、第一站);非目标=不实现任何模块、不详设每个模块字段(留各自 PRD)、不碰客户端、不做具体业务功能、不在地基期建完整 spec 到 Go 生成器。",

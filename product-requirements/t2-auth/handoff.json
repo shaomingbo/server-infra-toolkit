@@ -6,7 +6,7 @@
   "summary": "server-infra-toolkit 第三推进站:在 T0(HTTP 壳/错误信封/日志/config.Secret)+ T1(连接池 DBTX+Begin/sqlc/迁移)之上建首个 internal/modules/auth——用户名+密码登录(argon2id)颁发 opaque access+refresh token,refresh 滚动轮换+可撤销,Bearer 中间件保护端点,DB 层账户锁定防爆破,手写 DTO+golden,经客户端真实消费验证后冻结 auth 契约立 T3-T5 范式。",
   "goal_alignment": {
     "status": "clear",
-    "target_user": "客户端 app-infra-toolkit(消费 POST /v1/auth/login + /v1/auth/refresh)+ 明博(单人实现者,Go 新手+AI 杠杆);次要:T3(首个真实 DTO 样板)、T4/T5(import auth Bearer 中间件)。",
+    "target_user": "客户端 app-infra-toolkit(消费 POST /v1/auth/login + /v1/auth/refresh)+ 维护者(单人开发+AI 协作的实现者);次要:T3(首个真实 DTO 样板)、T4/T5(import auth Bearer 中间件)。",
     "problem": "ROADMAP 把 auth 排为 T0/T1 后第一个真实业务对端(几乎所有业务门槛+解锁客户端登录),但只有一行表格;需展开成可落地 PRD 并走通后冻结契约立可复用范式。",
     "success_outcome": "客户端用用户名+密码登录拿 LoginSession{userId,accessToken,refreshToken,expiresAt}(全 camelCase、expiresAt Unix 毫秒,W1 核实),refreshToken 续期;密码 argon2id 哈希、refresh token 哈希存储+滚动轮换+可撤销;Bearer 保护端点;基本爆破/枚举/重放防护;契约经客户端真实消费验证后冻结,立 T3-T5 wire+Go 接口样板。",
     "scope_boundary": "纯 T2 auth 单站(用户名密码登录/刷新 + 首个 internal/modules/auth + Bearer 中间件 + DB 账户锁定 + 契约固化);非目标见 non_goals(不做 OAuth/SSO/MFA/权限角色/自助注册/密码重置/客户端/离线包/事件)。",

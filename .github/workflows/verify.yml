@@ -2,6 +2,9 @@ name: verify
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-22.04

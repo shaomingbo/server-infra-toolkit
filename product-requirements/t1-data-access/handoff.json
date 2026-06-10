@@ -6,7 +6,7 @@
   "summary": "为 server-infra-toolkit 第二推进站 T1 数据接入层起草可落地 PRD。在 T0 线上最小闭环之上建服务端第一个有状态地基:pgxpool 连接池(替换运行时裸连接、保留 -smoke)、sqlc schema-first 工作流、版本化可回滚迁移规范、双缩零(Cloud Run 实例缩零 + Neon 计算缩零)连接池适配、CI 增量 gate。明博已确认范围=纯 T1,T0 部署冒烟+CI绿作为动手前置。",
   "goal_alignment": {
     "status": "selected",
-    "target_user": "明博——server-infra-toolkit 的规划者+唯一实现者(熟 Node.js、Go 新手,单人+AI 杠杆);次要消费者=T1 落地的 implementer/reviewer 与首个数据层消费者 T2 auth",
+    "target_user": "维护者(单人开发+AI 协作),即 server-infra-toolkit 的规划者兼唯一实现者;次要消费者=T1 落地的 implementer/reviewer 与首个数据层消费者 T2 auth",
     "problem": "ROADMAP 下一站 T1 数据接入层只有一行表格,需展开成可落地 PRD;同时 codebase-scan 发现 T0 部署冒烟+CI真跑绿尚无执行痕迹,需明确它与 T1 的依赖(T1 双缩零适配验收依赖真实线上环境)",
     "success_outcome": "T1 有一份可另起 session 直接落地的 PRD(pgxpool 连接池+sqlc+可回滚迁移规范+双缩零适配+CI 增量 gate),后续有状态模块(首个=T2 auth)能 import internal/platform/db 经窄接口拿到配置正确、缩零下能自愈重连的连接池并用 sqlc 类型安全函数查库;T0 部署冒烟+CI绿作为动手前置(待完成,不在本 PRD 实现)",
     "scope_boundary": "范围=纯 T1 数据接入层单站 PRD;不做 T0 部署收尾、不实现业务表、不碰客户端、不改 T0 顶层目录第一层",
@@ -134,7 +134,7 @@
     {"id": "D8", "decision": "保留 T0 的 -smoke/db.Smoke 一次性裸连接不动,FR1 只替换服务运行时连接获取", "reason": "-smoke 是 T0 部署冒烟基础设施(T0 AC10/AC12 依赖),never break userspace;冒烟要最便宜证明 DSN+网络通,起池子反而更重", "override_if": "无"}
   ],
   "open_questions": [
-    {"id": "Q1", "question": "迁移工具最终选型?", "why_mingbo_owned": "会被 T2-T8 所有有状态站继承的长期工具链 lock-in;且明博熟 Node.js 可能有 Prisma 声明式/knex 命令式的迁移心智偏好,工具手感是个人运维偏好", "recommended_default": "golang-migrate(纯 SQL up/down、生态最大、CLI+库两用、Neon 兼容,与 sqlc 纯 SQL 心智一致);已排除 atlas(声明式引入第二份 schema 真相源违 NFR6);候选 goose/tern(jackc 与 pgx 同源)亦可;T1 动手时定"},
+    {"id": "Q1", "question": "迁移工具最终选型?", "why_mingbo_owned": "会被 T2-T8 所有有状态站继承的长期工具链 lock-in;且维护者可能有 Prisma 声明式/knex 命令式的迁移心智偏好,工具手感是个人运维偏好", "recommended_default": "golang-migrate(纯 SQL up/down、生态最大、CLI+库两用、Neon 兼容,与 sqlc 纯 SQL 心智一致);已排除 atlas(声明式引入第二份 schema 真相源违 NFR6);候选 goose/tern(jackc 与 pgx 同源)亦可;T1 动手时定"},
     {"id": "Q2", "question": "Neon 当前套餐连接数上限+用 pooler 端点还是直连端点?", "why_mingbo_owned": "套餐连接上限是明博云账号实际状态协调者无法查;pooler vs 直连端点连接语义不同(影响 MaxConns 取值),T0 已留此二选一坑", "recommended_default": "实现前确认当前套餐连接上限,pool_max_conns 取保守值(使×预期最大实例数≤上限);端点 pooler/直连二选一(缩零场景下唤醒/连接复用语义有别,实现时核实当前 Neon 文档);并入 T1 动手前置 checklist"}
   ],
   "tasks": [

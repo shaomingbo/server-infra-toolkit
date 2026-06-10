@@ -6,7 +6,7 @@
   "summary": "把 server-infra-toolkit(Go 服务端基础设施,独立新 repo,代码层 greenfield)从空仓库带到能真实部署上线的最小骨架。范围 6 项:HTTP 服务壳、统一错误响应信封、服务端自身结构化日志、配置与密钥注入、CI 入口脚本、一次真实 Cloud Run/Neon 部署冒烟;并在第一站一次性落定顶层目录树、CI 约定与四项接口契约(包依赖方向、错误信封、版本语义、config 加载机制)的冻结边界。目的是把明博最大的两个未知(Go 上手与部署链)在最便宜的时点点亮,并给后续 T1-T6 一套不需再起迭代去补的地基。本 PRD 由协调者并行调度 5 个 opus sub agent(1 扫描客户端取证加 4 视角批判)综合而成,mode L1。",
   "goal_alignment": {
     "status": "clear",
-    "target_user": "明博——规划者加唯一实现者,熟 Node.js、Go 新手,单人开发加 AI 杠杆;次要消费者:后续 T1-T6 各站实现 agent(复用 T0 的目录树、CI、错误信封、日志、config 机制)与客户端 app-infra-toolkit(契约对端,消费服务端 HTTP 状态码做错误归一)。",
+    "target_user": "维护者(单人开发加 AI 协作),既是规划者也是唯一实现者;次要消费者:后续 T1-T6 各站实现 agent(复用 T0 的目录树、CI、错误信封、日志、config 机制)与客户端 app-infra-toolkit(契约对端,消费服务端 HTTP 状态码做错误归一)。",
     "problem": "服务端 greenfield,需要一个能真实上线的最小骨架承载后续所有模块;同时把 Go 加部署链这个最大未知在最便宜处先点亮,并避免客户端历史痛点(事后专门起迭代补目录/CI、重排被依赖路径)。",
     "success_outcome": "clone repo 后本地 scripts/verify.sh 全绿、push 触发 GitHub Actions 真 runner 跑绿、一条命令部署到 Cloud Run、/livez 返回 200 且日志能看到 request id 与时延与部署版本、一次性 SELECT 1 证明连通 Neon、整条部署链打通;顶层目录树加 CI 约定加四项接口契约已写死冻结,后续模块接入零目录/CI 迁移。",
     "scope_boundary": "范围=6 项闭环加目录/CI 约定加四项接口契约冻结加本地可跑性;非目标=DB 接入层(T1)、auth(T2)、业务对端、完整 codegen(T3 起)、限流(各对端站)、完整健康检查/优雅关闭/多环境(T6)、签名私钥(T4)、业务错误码枚举闭集。",

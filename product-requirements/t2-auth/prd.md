@@ -15,7 +15,7 @@
 
 ## 2. Goal Alignment
 
-- **目标用户**:客户端 `app-infra-toolkit`(消费 `POST /v1/auth/login` + `POST /v1/auth/refresh`)+ 明博(单人实现者,熟 Node.js、Go 新手 + AI 杠杆)。次要消费者:T2 落地的 implementer/reviewer/test-runner;**T3**(契约对账拿 auth 当首个真实 DTO 样板);**T4/T5**(import auth 的 Bearer 中间件保护各自端点)。
+- **目标用户**:客户端 `app-infra-toolkit`(消费 `POST /v1/auth/login` + `POST /v1/auth/refresh`)+ 维护者(单人开发 + AI 协作的实现者)。次要消费者:T2 落地的 implementer/reviewer/test-runner;**T3**(契约对账拿 auth 当首个真实 DTO 样板);**T4/T5**(import auth 的 Bearer 中间件保护各自端点)。
 - **问题**:ROADMAP 把 T2 auth 排为 T0/T1 之后第一个真实业务对端,但只有一行表格。auth 是所有受保护业务端点的门槛(T4/T5 受 Bearer 保护、T8 权限建其上),需先展开成可落地 PRD 并走通后冻结契约立范式。
 - **成功长什么样**:客户端用用户名+密码登录拿 `LoginSession{userId, accessToken, refreshToken, expiresAt}`(全 camelCase、expiresAt=Unix 毫秒),用 refreshToken 续期;密码 argon2id 哈希、refresh token 哈希存储 + 滚动轮换 + 可撤销;Bearer 中间件保护端点;基本爆破 / 用户枚举 / refresh 重放有防护;契约经客户端真实消费验证后冻结,立 T3-T5 可复用的 wire + Go 接口样板。
 - **范围边界**:范围 = 纯 T2 auth 单站(用户名密码登录/刷新 + 首个 `internal/modules/auth` + Bearer 中间件 + DB 账户锁定 + 契约固化)。非目标见 §5 逐条钉死。不做 OAuth/SSO/MFA、权限角色、自助注册、密码重置、客户端、离线包/事件。
