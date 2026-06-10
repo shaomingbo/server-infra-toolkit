@@ -33,6 +33,17 @@
 - [ ] Artifact Registry repo 就绪(Docker 仓库,路径
       `<REGION>-docker.pkg.dev/<PROJECT_ID>/<AR_REPO>`),且本地已 `gcloud auth configure-docker <REGION>-docker.pkg.dev`。
 
+**上面四类高频配置错误(IAM 授权 / secret 可读 / 镜像已推 / DSN 含 sslmode)有只读自动化拦截**——构建推镜像(第 3 节)后、部署(第 4 节)前跑一次:
+
+```bash
+./scripts/deploy-precheck.sh             # 检查当前 HEAD 对应的镜像 tag
+./scripts/deploy-precheck.sh <git-sha>   # 或显式指定要部署的 tag(须与 build.sh 推的一致)
+```
+
+- 脚本**只读、幂等、绝不做任何 gcloud 写操作**(D6),属手动部署链(与 `build.sh` / `smoke.sh` 同列),**不进 `verify.sh`、不进 CI**(部署链 ≠ CI gate,见 CONTRACTS.md §8)。
+- 退出码语义:`0` 四项全过;`1` 某项**配置缺失**(输出指明缺哪项,去补齐);`3` **凭据缺失**(gcloud 没装 / 未认证 —— 与配置缺失区分,见 PRD E3,先 `gcloud auth login` 再重跑)。
+- 坐标零硬编码:project 取自 `gcloud config`、运行时 SA 由 project number 推导、`IMAGE_REPO` 取自本地 `.env`,脚本里无任何真实坐标(NFR2)。
+
 ---
 
 ## 2. 部署前迁移步骤(对应 PRD AC9 / FR8 / NG7 / E2)
@@ -124,6 +135,7 @@ gcloud run deploy server-infra-toolkit \
 
 - `--no-traffic --tag candidate`:新 revision 部署但先不接生产流量,Cloud Run 给它一个带 `candidate` 标签的独立 URL(PRD AC13)。
 - 对这个**候选 URL** 跑第 5 节冒烟,5 条全绿后再走第 6 节 `update-traffic --to-latest` 切流量。
+- **本节是蓝绿候选的部署动作;完整的「主线外验证」闭环(候选部署 → 候选 URL 冒烟 → 切流量 → 回滚)整合在第 12 节,演练与回写也在那里**(T6 FR7)。
 
 ---
 
@@ -220,3 +232,232 @@ gcloud run services update-traffic server-infra-toolkit --to-latest --region <RE
 
 验收通过判据:首请求返回成功(非 5xx),且至少一次缩零重试中观测到 `db_retry_attempt` → `db_retry_succeeded`
 事件链。通过后据观测到的真实冷启动时延 / SQLSTATE 回调 `retry.go` 的 `totalBudget` 与 `retryableSQLSTATEs`(NFR8)。
+
+---
+
+## 10. Startup probe 配置(对应 T6 FR1 / AC1 / AC12 / D4)
+
+> **运行时基线加固:给 Cloud Run 显式配 startup probe,让缩零唤醒的冷启动有受控余量,实例不被默认探针误判。**
+> probe 是 GCP 侧手工配置(`gcloud run services update` 的 flag,不进任何脚本——`gcloud` 写操作刻意人在回路);
+> 期望值落本 runbook + 第 10.3 节 describe 只读对账,**不引入 service.yaml 声明式路径**(D7,避免双真相漂移)。
+
+### 10.1 配 startup probe(指向 `/livez`,绝非 `/healthz`)
+
+```bash
+gcloud run services update server-infra-toolkit --region <REGION> \
+  --startup-probe=httpGet.path=/livez,httpGet.port=8080,initialDelaySeconds=0,periodSeconds=10,timeoutSeconds=1,failureThreshold=6
+```
+
+- **path 必须是 `/livez`,绝不能是 `/healthz`。** GCP 边缘层保留了 `/healthz`,探针打 `/healthz` 会被边缘拦截(404),实例被判不健康进重启循环。`/livez` 是本服务无 DB 依赖的存活探针(缩零安全:Neon 睡着时探针不连库,不会因此杀实例),`livez_guard_test.go` 用 AST + `go list -deps` 强制它不引入 db 包。
+- **port `8080`**:容器监听端口(`PORT` 缺省 8080;Cloud Run 注入 `PORT` 时与此一致)。
+
+### 10.2 参数数值与冷启动余量论证(对应 E1)
+
+| 字段 | 取值 | 理由 |
+| --- | --- | --- |
+| `initialDelaySeconds` | `0` | `/livez` 无 DB 依赖、进程一起来就能应答,不需要延迟首探;Go 服务监听端口即就绪。 |
+| `periodSeconds` | `10` | 探测间隔,GCP 默认值;与 failureThreshold 相乘给出总余量(见下)。 |
+| `timeoutSeconds` | `1` | 单次探测超时;`/livez` 是常数响应、本地不连库,1s 远够(约束:`timeoutSeconds` 不得超过 `periodSeconds`)。 |
+| `failureThreshold` | `6` | **冷启动总余量 = `failureThreshold × periodSeconds` = 6 × 10 = 60 秒**。这是 Cloud Run 允许容器开始监听端口的窗口(硬上限 240s)。 |
+
+**冷启动余量论证(为何 60s 而非默认 3×10=30s)**:本服务启动路径是"惰性建池、不拨号、不预热"(`db.NewPool` min conns 强制 0),进程本身秒级起来;但 Cloud Run 缩零唤醒包含拉取镜像 + 容器冷启动的平台开销,镜像较大或区域冷时偶发偏慢。`/livez` 不连库所以**不受 Neon 唤醒时延影响**——给到 60s 是对"镜像拉取 + 容器调度"平台抖动留的安全垫,远低于 240s 硬上限,也不会让真正起不来的实例卡太久。E1(参数过紧致重启循环)的兜底是 AC1 的三连冷启动验证:配完后缩零再唤醒三次,每次首请求 200、`gcloud run revisions list` 无 revision 处于非 Ready 或重启循环。
+
+> **未配 startup probe 时 Cloud Run 的默认行为**(供对照):平台自动建一个默认 **TCP** startup probe(`timeoutSeconds=240, periodSeconds=240, failureThreshold=1`),即只检端口是否监听、给 240s。显式配 HTTP probe 打 `/livez` 比默认 TCP 探测多一层"HTTP 真能应答"的保证,且 60s 窗口更贴合本服务的真实冷启动剖面。
+
+### 10.3 describe 只读对账(对应 R3 漂移检查)
+
+GCP 侧手工改 probe 后,把配置与本 runbook 声明对账一次(R3:控制台改了文档没改会漂移),并纳入每次部署的检查清单:
+
+```bash
+gcloud run services describe server-infra-toolkit --region <REGION> \
+  --format="yaml(spec.template.spec.containers[].startupProbe,spec.template.spec.containers[].livenessProbe)"
+```
+
+对账要点:① `startupProbe.httpGet.path` 字段值 **等于 `/livez`**(AC1);② 上述四个参数与第 10.2 节表格一致;③ **`livenessProbe` 字段为空/未设置**(AC12,见 10.4)。
+
+### 10.4 liveness probe 不配 + 已接受风险(对应 FR1 / D4 / R1 / AC12)
+
+> **本站只配 startup probe,显式不配 liveness probe。** 这是有意决策(D4),不是遗漏。
+
+- **为何不配**:liveness probe 配错(阈值过紧 / 路径选错)= 实例被周期性判死并循环重启,爆炸半径远大于它的收益。
+- **已接受风险(R1)**:**进程挂死(死锁 / 活锁,进程还活着但不再正常服务)的自动发现手段缺位。** 没有 liveness probe,这类"假活"实例不会被平台主动杀掉重建。
+- **现有兜底**:① Cloud Run 对**进程崩溃(crash)** 自动重启;② `min-instances=0` 缩零会天然轮换实例(idle 后实例被回收,下次唤醒是新实例);③ startup probe 覆盖"起不来"场景。挂死场景只在"进程不崩、又长期不缩零"的窗口里裸奔,概率低(likelihood low)。
+- **override 条件**:线上出现真实挂死事故时再评估配 liveness(D4 override_if)。
+
+### 10.5 关停宽限期声明与排空预算对账(对应 T6 FR2 / AC3)
+
+> **Cloud Run 关停宽限期 = 固定 10 秒,平台常量,不可配。** 实例缩容 / 换 revision / 任何 shutdown 时,Cloud Run
+> 先发 `SIGTERM`,**10 秒**后发 `SIGKILL`。fully managed 形态**不暴露** `terminationGracePeriodSeconds` 配置入口,
+> 也**不出现在** `gcloud run services describe` 的任何字段里——对账只能锚定本文档声明的常量(10s),不能从 describe 读。
+
+- **代码侧排空预算必须 ≤ 10s**:`cmd/api` 关停先排空 HTTP in-flight 请求(预算约 5s)再关连接池(预算约 2s),两者之和 ≈ 7s,**留约 3s 安全垫给平台 SIGKILL 之前**。
+- **两处同步纪律(改一处必改另一处)**:① 本 runbook 声明的宽限期数值(**10s**);② `cmd/api` 的关停预算锚定断言(FR2/AC3:HTTP 排空预算 + 池关闭预算之和 ≤ 10s,改任一常量该测试变红)。**runbook 的 10s 与代码锚定断言上限是同一个数,任一处变更必须同步另一处**,否则代码预算可能悄悄超过平台宽限期、in-flight 请求被 SIGKILL 截断。
+- **注意 SIGTERM 是尽力而为**:exceptional cases 下 SIGTERM 可能发给仍在处理请求的容器;排空窗口只有 10s,**比 HTTP `WriteTimeout`(15s)短**——所以单个超长请求仍可能在关停时被截断,这是 10s 平台常量的固有约束,不是 bug。
+
+---
+
+## 11. Neon 用量手动检查(对应 T6 FR5 / AC6 / D2)
+
+> **决策:Neon 用量只做 runbook 手动检查,不做自动告警 / 轮询(D2)。**
+> 理由:自动化需要常驻 / 定时任务(撞 NFR1 "无主动探测"红线)+ 新 secret(Neon API key,撞"无新 secret")。
+> 收益不抵复杂度与攻击面,降级为下面的手动检查清单。零代码、零轮询、零新 secret。
+> Override:若 Neon 当前 plan 原生提供阈值推送,改为在 Neon 控制台配置(仍零代码)。
+
+### 11.1 控制台入口路径
+
+Neon Console(`https://console.neon.tech`)→ 选中本项目 → 左侧 **Usage / Billing**(用量与计费页)。按需也可进单个 branch / compute 的 **Monitoring** 看实时曲线。
+
+### 11.2 关注指标清单
+
+| 指标 | 看什么 | 为何关注 |
+| --- | --- | --- |
+| **Compute hours(计算时长)** | 本计费周期累计的 active compute 小时数 | scale-to-zero 下本应很低;异常飙升 = 有东西在持续唤醒 compute(可能是误加的主动探测,撞 NFR1)。 |
+| **Storage(存储)** | 数据库占用容量 | `events` 表(T5)随时间增长,无清理(保留清理划 T7);盯住增速,逼近 plan 上限前要么清理要么升档。 |
+| **Data transfer / 出网(egress)** | 出站流量 | 异常出网可能指向数据被大量拉取或循环查询。 |
+
+### 11.3 红线数值(建议值,明博可调)
+
+> 以下为**建议红线**,具体阈值明博按当时所选 Neon plan 的实际配额调整,不是硬契约。
+
+- **Compute hours**:超过当月配额 **70%** 时排查是否有非预期的持续访问(scale-zero 下不该有);**90%** 时考虑限流或升档。
+- **Storage**:超过 plan 容量 **80%** 时安排 T7 的保留清理或评估升档。
+- **检查节奏建议**:与 GCP budget 告警(第 13 节)邮件触达同期手查一次,不设定时任务。
+
+---
+
+## 12. 主线外验证:蓝绿候选全流程(对应 T6 FR7 / FR8 / AC9 / D1)
+
+> **G3 preview 决策(D1)**:复用现有蓝绿候选机制(`--no-traffic --tag candidate`)作为正式的「主线外验证」路径,
+> **不建持久 preview 环境**(第二 Cloud Run service + Neon branch)。持久 preview 的四重新风险(孤儿 branch 计费 /
+> 配置漂移 / 攻击面 / 坐标泄露)无现时收益,**defer 到客户端 `app-infra-toolkit` 联调需求出现时**再按真实形状 forge。
+
+> **演练前提(对应 E4)**:本流程的回滚步骤需要**至少 2 个 revision**(候选 + 一个可回退的前序 revision)。
+> 服务只有一个 revision 时无可回退目标,先正常部署积累一个前序 revision 再演练回滚。
+
+本节把分散在第 4b / 5 / 6 / 7 节的命令整合成一条可照抄的闭环。
+
+### 12.1 候选部署(不切流量)
+
+```bash
+gcloud run deploy server-infra-toolkit \
+  --image <REGION>-docker.pkg.dev/<PROJECT_ID>/<AR_REPO>/<IMAGE>:$(git rev-parse --short HEAD) \
+  --no-traffic --tag candidate \
+  --service-account <PROJECT_NUMBER>-compute@developer.gserviceaccount.com \
+  --allow-unauthenticated \
+  --set-secrets NEON_DSN=NEON_DSN:latest \
+  --max-instances=2 \
+  --min-instances=0 \
+  --region <REGION>
+```
+
+新 revision 部署但 0% 流量,Cloud Run 给它一个带 `candidate` 标签的独立 URL(见第 4b 节)。记下候选 URL。
+
+### 12.2 候选 URL 冒烟
+
+```bash
+bash scripts/smoke.sh https://candidate---<service>.run.app   # 候选 URL(带 candidate 标签)
+```
+
+对候选 URL 跑第 5 节的 5 条断言,**全绿**才进切流量。任一红 → 不切流量,线上仍由旧 revision 服务,删候选或修复重部(无需回滚,因为流量从未切过去)。
+
+### 12.3 切流量(冒烟全绿后)
+
+```bash
+gcloud run services update-traffic server-infra-toolkit --to-latest --region <REGION>
+```
+
+线上由候选 revision 接管 100% 流量。切完再对生产 URL 跑一次第 5 节冒烟做部署后确认。
+
+### 12.4 回滚(切流量后发现问题)
+
+```bash
+# 1. 列出 revision,找到要回退的前一个 revision 名
+gcloud run revisions list --service server-infra-toolkit --region <REGION>
+
+# 2. 把流量显式切回前一 revision(100%)
+gcloud run services update-traffic server-infra-toolkit --to-revisions=<prev-revision>=100 --region <REGION>
+```
+
+回滚后对生产 URL 跑冒烟,确认 `/livez` 返回的 `version` **等于前一 revision 的 SHA**(AC9)。
+
+### 12.5 演练记录(T7 实操回写)
+
+> 以下待 T7 蓝绿候选 + 回滚实走演练后回写:演练日期、候选 revision 名、回退目标 revision 名、回滚后 `/livez` 的 `version` 值。
+
+- **状态:DEFERRED(尚未演练)。** 待 T7 实操后填入上述四项,DEFERRED 标记消失(对应 AC9 回写要求)。
+
+---
+
+## 13. GCP Billing budget 告警(对应 T6 FR4 / AC5 / D3 / R2 / E2)
+
+> **告警定位:事后知情层,不是实时防线。** GCP 账单数据自身延迟 24h+,budget alert 跨阈值的邮件触达**滞后**于真实消费(R2)。
+> **实时防线是 `--max-instances=2`(部署时已设)+ T5 的请求体 / 条数硬上限**;budget alert 只负责"月度趋势跨阈值时知会一声"(D3)。
+
+### 13.1 创建三档阈值 budget
+
+`gcloud billing budgets create` 是 GA 命令组。三档阈值 = 重复传三次 `--threshold-rule`(percent 是 0.0–1.0 小数):
+
+```bash
+gcloud billing budgets create \
+  --billing-account=<BILLING_ACCOUNT_ID> \
+  --display-name="server-infra-toolkit-monthly" \
+  --budget-amount=<MONTHLY_BUDGET>USD \
+  --threshold-rule=percent=0.5 \
+  --threshold-rule=percent=0.9 \
+  --threshold-rule=percent=1.0
+```
+
+- `<BILLING_ACCOUNT_ID>` 是占位符,真实 billing account id 形态为 `XXXXXX-XXXXXX-XXXXXX`(只存本地 `.env`,NFR2);`<MONTHLY_BUDGET>` 替成月预算金额(如 `20`)。
+- 三档 `percent=0.5 / 0.9 / 1.0` 即 50% / 90% / 100%;`basis` 默认 `current-spend`(已花费占比),需要按预测花费可加 `,basis=forecasted-spend`。
+
+### 13.2 通知渠道说明(对应 E2)
+
+- **默认通知对象**:budget 默认把告警邮件发给该 billing account 上所有 **Billing Account Administrator / Billing Account User** 角色的人。
+- **⚠️ 默认收件人不一定是明博的常用邮箱(E2)。** 创建后**务必发一次测试通知确认明博常用邮箱能收到**(AC5):若默认渠道不对,改用自定义 Cloud Monitoring 通知渠道——
+  ```bash
+  # 在上面的 create 命令追加:挂自定义通知渠道(先在 Cloud Monitoring 建好 channel,拿到 CHANNEL_ID)
+  --notifications-rule-monitoring-notification-channels=<CHANNEL_ID>
+  ```
+  或用 `--disable-default-iam-recipients` 关掉默认收件人后只走自定义渠道。
+- **测试通知未达 → 修通知渠道后重验**,不接受"创建成功就算完"(E2)。
+
+---
+
+## 14. 坐标 grep 自查(对应 T6 NFR2 / AC10 / E6)
+
+> **目的**:T6 落地后全仓不得出现真实 GCP 坐标(project number / region / 服务域名 / billing account),文档一律占位符(NFR2)。
+> 下面的 grep 模式**只匹配真实值形态**,占位符与测试 fixture 走白名单(E6:防占位符 / 示例误报)。
+
+```bash
+# A. project number(12 位数字),只在 GCP 语境出现时算命中,排除占位符 <PROJECT_NUMBER>。
+#    含两支:数字在 GCP 关键字之后(projects/ / @ / projectNumber:),以及最常见的
+#    泄露形态——compute SA 邮箱 `<12 位>-compute@`(数字在 @ 之前,前一支不命中)。
+grep -rnE '(projects/|@|projectNumber["[:space:]:=]+)[0-9]{12}|[0-9]{12}-compute@' . \
+  --include='*.md' --include='*.sh' --include='*.go' --include='*.yaml' --include='*.yml' --include='*.json' \
+  | grep -v '\.git/' | grep -vE '<PROJECT_NUMBER>'
+
+# B. 真实 region 字串(GCP region 形态:洲-方向+数字,如 <continent>-<dir><N>)
+grep -rnE '\b(us|europe|asia|australia|northamerica|southamerica|me|africa)-[a-z]+[0-9]\b' . \
+  --include='*.md' --include='*.sh' --include='*.go' --include='*.yaml' --include='*.yml' --include='*.json' \
+  | grep -v '\.git/'
+
+# C. run.app 真实服务域名,排除占位符 <...>.run.app 与示例域名
+grep -rnE 'https?://[a-zA-Z0-9.-]+\.run\.app' . \
+  --include='*.md' --include='*.sh' --include='*.go' --include='*.yaml' --include='*.yml' --include='*.json' \
+  | grep -v '\.git/' | grep -vE '<[^>]+>\.run\.app|my-service-xyz\.run\.app'
+
+# D. billing account(6-6-6 十六进制大写,如 XXXXXX-XXXXXX-XXXXXX 的真实值)
+grep -rnE '\b[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}\b' . \
+  --include='*.md' --include='*.sh' --include='*.go' --include='*.yaml' --include='*.yml' --include='*.json' \
+  | grep -v '\.git/'
+```
+
+**白名单(已知非真实坐标,命中视为误报,见 E6)**:
+
+- 占位符:`<REGION>` / `<PROJECT_ID>` / `<PROJECT_NUMBER>` / `<AR_REPO>` / `<IMAGE>` / `<BILLING_ACCOUNT_ID>` / `<MONTHLY_BUDGET>` / `<service>.run.app` / `<CHANNEL_ID>` / `<prev-revision>`。其中 compute SA 占位形态 `<PROJECT_NUMBER>-compute@developer.gserviceaccount.com` 含 `<PROJECT_NUMBER>` 子串,已被模式 A 的 `grep -vE '<PROJECT_NUMBER>'` 排除,不会误命中。
+- 示例域名:`my-service-xyz.run.app`(`scripts/smoke.sh` 用法注释里的示意,非真实服务名)。
+- 测试 fixture:auth 模块的 UUID fixture(`11111111-2222-4333-8444-555555555555` 等)内含的数字段——A 模式已用 GCP 语境锚定排除,不会误命中。
+
+**判据**:四条命令(套用白名单 `grep -v` 后)**全部无输出**即通过(AC10)。
+
+---

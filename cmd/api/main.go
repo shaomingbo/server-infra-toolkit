@@ -25,6 +25,35 @@ import (
 // Defaults to "dev" for local builds.
 var version = "dev"
 
+// Graceful-shutdown time budgets (FR2/D5). The shutdown path drains in-flight
+// HTTP requests first, THEN closes the pool, so the two budgets run back-to-back
+// and their sum is what must fit inside the platform's termination grace period.
+//
+// cloudRunGracePeriod is the Cloud Run (fully managed) SIGTERM->SIGKILL window: a
+// fixed 10-second platform constant that is NOT configurable and does NOT appear
+// in the service spec/describe output (verified against
+// docs.cloud.google.com/run/docs/container-contract). It is pinned here only as
+// the ceiling the drain budgets are reconciled against.
+//
+// CONTRACT: httpDrainBudget + poolCloseBudget must stay <= cloudRunGracePeriod.
+// TestShutdownBudgetFitsGracePeriod (AC3) fails if any of these three constants
+// drifts; when you change one, also update the grace-period declaration in
+// docs/DEPLOY.md so the code and the runbook never disagree.
+const (
+	httpDrainBudget     = 5 * time.Second
+	poolCloseBudget     = 2 * time.Second
+	cloudRunGracePeriod = 10 * time.Second
+)
+
+// errorPathPoolCloseGrace bounds the pool close on the ListenAndServe FAILURE path
+// (e.g. the port is already taken) so a stuck connection cannot wedge the process on
+// the way out. It is deliberately its OWN constant, not httpDrainBudget: that error
+// path is NOT the SIGTERM drain sequence, so it must not silently track the HTTP-drain
+// budget — tuning the drain budget should not move the error-path close grace. It is
+// therefore intentionally OUT of scope for TestShutdownBudgetFitsGracePeriod, which
+// reconciles only the SIGTERM drain budgets against cloudRunGracePeriod.
+const errorPathPoolCloseGrace = 5 * time.Second
+
 // Compile-time guard that the runtime pool type satisfies the HTTP layer's DB
 // interface. The two interfaces (db.DBTX and apphttp.DB) are declared separately
 // by design — the http package must not import the db package (AC11) — so this
@@ -292,31 +321,52 @@ func run() error {
 			return nil
 		}
 		// ListenAndServe failed for some other reason (e.g. the port is taken):
-		// close the pool before returning so this error path does not leak it.
-		closePoolWithGrace(pool, 5*time.Second)
+		// close the pool before returning so this error path does not leak it. This
+		// is NOT the SIGTERM drain sequence, so it uses its own grace
+		// (errorPathPoolCloseGrace), independent of the HTTP-drain budget.
+		closePoolWithGrace(pool, errorPathPoolCloseGrace)
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		// Drain in-flight HTTP requests first, THEN close the pool, so requests
-		// still using pooled connections are not cut off mid-flight (FR9/E6).
-		err := srv.Shutdown(shutdownCtx)
-		// Close the pool with a grace guard so a connection that refuses to return
-		// cannot block past the Cloud Run SIGTERM grace and get the process hard
-		// killed. T1 does the minimal pool-close hookup only; full connection
-		// draining/orchestration is deferred to T6 (NG9).
-		closePoolWithGrace(pool, 2*time.Second)
-		return err
+		return gracefulShutdown(srv, pool)
 	}
+}
+
+// gracefulShutdown runs the SIGTERM/SIGINT drain sequence: it drains in-flight
+// HTTP requests first (srv.Shutdown within httpDrainBudget), THEN closes the pool
+// (closePoolWithGrace within poolCloseBudget), so requests still using pooled
+// connections are not cut off mid-flight (FR9/E6). It is extracted from run() so
+// the drain sequence is testable in isolation (FR2/AC2) without a live signal or
+// network; the seams take narrow interfaces so a fake server/pool can be injected.
+//
+// NG9 ("complete connection draining") is closed out HERE per PRD D5: HTTP-drain-
+// then-pgxpool.Close (which blocks until connections are returned) already covers
+// the normal in-flight path, so no active per-connection draining/orchestration is
+// added. The remaining guard is the budget reconciliation: httpDrainBudget +
+// poolCloseBudget <= cloudRunGracePeriod, pinned by TestShutdownBudgetFitsGracePeriod
+// (AC3).
+func gracefulShutdown(srv interface {
+	Shutdown(context.Context) error
+}, pool interface{ Close() }) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpDrainBudget)
+	defer cancel()
+	err := srv.Shutdown(shutdownCtx)
+	// Close the pool with a grace guard so a connection that refuses to return
+	// cannot block past the Cloud Run SIGTERM grace and get the process hard killed.
+	closePoolWithGrace(pool, poolCloseBudget)
+	return err
 }
 
 // closePoolWithGrace runs pool.Close() but waits at most grace for it to finish.
 // pool.Close() blocks until every connection is returned and torn down; if a
 // connection is stuck, waiting forever could overrun the Cloud Run SIGTERM grace
 // period and get the process SIGKILLed mid-teardown. After grace we stop waiting
-// and let the process exit — the OS reclaims the sockets. This is the minimal T1
-// guardrail; full graceful connection draining is a T6 item (NG9).
-func closePoolWithGrace(pool *db.Pool, grace time.Duration) {
+// and let the process exit — the OS reclaims the sockets. NG9 is closed out at
+// this budget guard (PRD D5): no active connection draining beyond pgxpool.Close.
+//
+// The pool is taken as a narrow Close() interface (not *db.Pool) so the grace
+// behaviour is testable with an injected fake whose Close() blocks past grace;
+// *db.Pool satisfies it unchanged.
+func closePoolWithGrace(pool interface{ Close() }, grace time.Duration) {
 	done := make(chan struct{})
 	go func() {
 		pool.Close()

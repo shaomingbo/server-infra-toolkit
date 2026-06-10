@@ -126,7 +126,7 @@
 - **wire 真相源迁移**:auth login/refresh 的 wire 真相,自 T3 起由 `internal/modules/auth/contract/` 下的机器可读 JSON Schema 持有(`login.schema.json` / `refresh.schema.json`)。
 - **主从关系明确**:§6 上述自然语言文字自此降为给人看的「人类摘要」,机器可读规范以 schema 为准——schema 为主,文字为从,二者冲突以 schema 为准。
 - **服务端校验(两段式防线链)**:服务端 CI(`scripts/verify.sh` step 3 的 `go test ./...`)用两道既有测试合起来咬住「真实响应 wire 符合 schema」,而非单点全链路。第一段——package auth 内的 conformance 测试,把 handler 的返回类型(`loginSession`)经与 handler 同款的 `json.NewEncoder(w).Encode` 路径序列化,校验产出的 wire 符合上述 schema(为何不走 DB/HTTP/`time.Now()` 全链路:PRD FR5/FR6 显式禁止,故测试针对类型本身)。第二段——T2 既有 handler 级测试(`TestLogin_Success` 等)断言真实响应体的精确键集,把「handler 真实输出 ↔ `loginSession` 类型」钉死。两段相接即「真实响应 ↔ schema」:改 `loginSession` 的 json tag 时两道防线同时变红(mutation 实演已验证),防文字与实现漂移。
-- **客户端校验(跨 repo)**:客户端仓库 `app-infra-toolkit` 在它自己的 CI 里消费此 schema 校验其解码器(跨 repo pin 由客户端侧负责维护,本仓库不承担客户端 pin 的同步)。
+- **客户端校验(跨 repo)**:客户端仓库 `app-infra-toolkit` 在它自己的 CI 里消费此 schema 校验其解码器(跨 repo pin 由客户端侧负责维护,本仓库不承担客户端 pin 的同步)。客户端以 git-commit-pin 方式 vendored 这两份 schema,故**任何改动 `internal/modules/auth/contract/` 下文件的 commit,message 必须含 `NEEDS-CLIENT-BUMP` 标记**提示客户端 bump pin(纪律详情见 `internal/modules/auth/contract/README.md`)。
 - **真相源归属**:真相源留在服务端(本仓库 `internal/modules/auth/contract/`),客户端为消费方。本次变更为纯 append、非 migration note 级变更(未改写/删除任何既有冻结项,仅新增 schema 与人类摘要的主从约定)。
 - **新增测试依赖申报**:conformance 测试引入 `github.com/santhosh-tekuri/jsonschema/v6`(v6.0.2)做 schema 校验,**仅测试引用、不进生产二进制**。实测 `go mod tidy` 后本仓库 go.mod 仅新增这一个直接依赖;其模块图中的传递依赖未被本仓库引用面触及——`golang.org/x/mod`/`x/sys`/`x/text`/`x/tools` 均未因本次进入 go.mod/go.sum(go.mod 既有的 `x/sys`/`x/text` indirect 来自 pgx 链,与本次无关),仅 `github.com/dlclark/regexp2 v1.11.0` 因 jsonschema 自身测试引用它而落了两行 go.sum 校验和,不进 go.mod、不参与本仓库任何构建或测试二进制。
 
@@ -144,3 +144,19 @@ T5 给服务端新增 observability 事件接收模块(`internal/modules/observa
 - **保留清理划 T7**:`events` 表带 `received_at` + 时间友好索引(`events_received_at_idx`),便于 T7 按时间 drop;T5 **不实现** DELETE/清理代码路径(模块内零清理)。去重窗口 = 保留周期(同表 `UNIQUE(source,event_id)` 副产品,不另建独立去重表)。
 - **自身遥测走 stdout(FR12)**:模块每批接收完成后以 slog JSON 打一条 `events_ingested`(accepted/duplicate/rejected/批大小/request_id)到 stdout,**绝不回写 `events` 表**(防递归/放大)。
 - **迁移**:`00003_events.sql` 纯新增,前滚不回退,破坏性 Down(`DROP TABLE events`)标 `IRREVERSIBLE`;sqlc gen 过漂移 gate、迁移从 version 0 round-trip 通过。
+
+---
+
+## 8. T6 范围声明(部署加固站,纯 append)
+
+T6 把部署运行时从「能跑」升级为「已验证」:Cloud Run startup probe 配置 + 关停预算对账 + 双缩零 DEFERRED 验收清偿;账单加被动 budget 告警层;部署链加只读前置校验脚本(`scripts/deploy-precheck.sh`)与正式的蓝绿候选「主线外验证」文档路径。本节为纯 append,**未改写/删除任何既有冻结项**。
+
+> **状态边界(防误读为"已完成")**:本段列的是 T6 范围,**不等于已全部线上落地**。已落地的是 runbook 文本与代码侧防线(关停预算对账常量 + `TestShutdownBudgetFitsGracePeriod`、`deploy-precheck.sh` 只读校验)。其中四项 GCP 实操——probe 配置、budget 告警、双缩零验收、蓝绿演练——按 `docs/DEPLOY.md` runbook 人在回路执行后才回写 `DEPLOY §9`(双缩零)/`§10`(probe)/`§12.5`(蓝绿)的 DEFERRED 标记;**执行前 DEPLOY 各节标的 DEFERRED 是如实状态,不是文档滞后**。
+
+- **工件落点(兑现 §1.1 目录树冻结 + 做小,D7)**:T6 工件全落 `scripts/` + `docs/`,**不开新第一层目录**——`scripts/deploy-precheck.sh`(只读前置校验)+ `docs/DEPLOY.md` 大修(probe/宽限期/蓝绿候选/Neon 用量/budget/坐标 grep 章节)+ 本 §8。第一层目录集合仍与 §1.1 一致。不引入 `service.yaml` 声明式部署路径(probe 期望值写 runbook + describe 只读对账,避免声明式文件与命令式部署双真相漂移)。
+- **无新 env var / 端点 / secret / schema / 日志字段(兑现 §1.3#4 config 机制 + 做小)**:T6 **不动 config 机制**(`internal/platform/config/` 零改动,不加 `APP_ENV`/profile/新 secret/日志 env 字段,D8),**不新增端点**(probe 复用既有 `/livez`,绝非 `/healthz`——GCP 边缘保留),**不新增 secret**(Neon 用量降级手动检查,不引入 Neon API key,D2),**不新增 Go 依赖**(go.mod 不变,NFR4)。
+- **`scripts/verify.sh` 仍是唯一 CI 入口(兑现 §1.4)**:`deploy-precheck.sh` **不被 `verify.sh` 引用、不进 CI、`.github/workflows/` 无新增文件与步骤**——它属手动部署链(与 `build.sh` / `smoke.sh` 同列),是部署链的只读前置 gate,**非 CI gate**。退出码区分配置缺失(`1`)与凭据缺失(`3`)。
+- **`gcloud` 写操作维持「刻意不进脚本」(D6/D9)**:probe 配置、budget 创建、部署 / 切流量 / 回滚等所有 `gcloud` 写操作均为 runbook 文本模板,人在回路手动执行,**不进任何脚本**;`deploy-precheck.sh` 只调只读 API(`get-iam-policy` / `secrets versions access` / 镜像 tag 探测),绝不写。部署保持手动,T6 只加护栏不加自动化(D9),不引入 CD / IaC(Terraform/Pulumi)/ 第二 Cloud Run service(NFR4)。
+- **无主动探测(NFR1)**:T6 不新增任何周期性请求服务的任务(Cloud Scheduler/cron/CI 定时);监控只用云厂商被动侧数据(GCP budget alert 邮件 + Neon 控制台手查)。
+- **probe 期望值落 runbook + describe 只读对账(R3 漂移检查)**:startup probe 只配指向 `/livez`(参数 `initialDelaySeconds=0, periodSeconds=10, timeoutSeconds=1, failureThreshold=6`,冷启动余量 60s);**不配 liveness probe**(D4,进程挂死发现手段缺位记为已接受风险 R1)。GCP 侧手工配置的期望值落 `docs/DEPLOY.md §10`,部署检查清单含一次 `gcloud run services describe` 只读对账。**Cloud Run 关停宽限期 = 平台固定 10s 常量**(不可配、不出现在 describe),与 `cmd/api` 关停预算锚定断言(HTTP 排空 + 池关闭之和 ≤ 10s)是同一数值,两处同步纪律见 `docs/DEPLOY.md §10.5`。
+- **坐标占位纪律(NFR2)**:真实 GCP 坐标(project number / region / 服务域名 / billing account)**只存在于本地 `.env`**,文档与脚本一律占位符;脚本从 `gcloud config` / `.env` / 参数取值,不硬编码。全仓坐标 grep 自查模式与白名单见 `docs/DEPLOY.md §14`,落地后全仓 grep 无真实坐标命中。
