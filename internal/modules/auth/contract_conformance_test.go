@@ -14,12 +14,14 @@ package auth
 //     (never a string, never float-rounded), so a ms↔s unit regression that
 //     produced a 1000x-different value would fail the equality assertion. (The
 //     source-level unit guard lives in expires_unit_guard_test.go.)
-//   - the schema's tightening keywords actually bite — three negative cases feed
+//   - the schema's tightening keywords actually bite — five negative cases feed
 //     malformed objects through the SAME compiled schema and assert validation
 //     fails, so a too-loose schema cannot pass silently: an EXTRA field proves
 //     additionalProperties:false bites, a MISSING expiresAt proves required bites,
-//     and a STRING expiresAt proves type:integer bites. Without these, relaxing
-//     required or type in the schema would leave the positive test still green.
+//     a STRING expiresAt proves type:integer bites, a non-UUID userId proves
+//     format:uuid bites (under AssertFormat), and a Unix-SECONDS expiresAt proves
+//     minimum (the ms floor) bites. Without these, relaxing a keyword in the
+//     schema would leave the positive test still green.
 //
 // Determinism: every input is a fixed literal (token strings, UUID, expiresAt);
 // no CSPRNG, no time.Now. The schemas are read from contract/ relative to the

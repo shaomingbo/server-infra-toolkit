@@ -19,3 +19,10 @@ The `userId` `format: "uuid"` check only verifies the 8-4-4-4-12 hex grouping
 shape. It does NOT check the RFC 4122 version or variant bits, so do not read it
 as proof that the id is a conformant RFC 4122 UUID — it is a shape guard, not a
 spec-conformance guarantee.
+
+Also note: in JSON Schema draft 2020-12, `format` is annotation-only by
+default — a validator rejects a malformed value only when format assertion is
+explicitly enabled (this repo's conformance test calls `AssertFormat()`). A
+consumer that wants `format: "uuid"` to actually reject must confirm its
+validator's format-assertion mode is on; otherwise treat the keyword as a
+machine-readable semantic declaration, not an enforced constraint.
