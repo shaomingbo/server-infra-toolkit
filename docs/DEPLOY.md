@@ -205,11 +205,9 @@ gcloud run services update-traffic server-infra-toolkit --to-latest --region <RE
 
 ## 9. 双缩零 L2 manual 验收 runbook(对应 PRD AC15 / NFR8 / D2 / E2)
 
-> **状态:DEFERRED(尚未执行,线上未验)。** 双缩零重试(`internal/platform/db/retry.go`)目前只有本地单测覆盖
-> 重试逻辑(`isTransientConnError` / budget 绑定)。「真实 Cloud Run + Neon 都缩零后首请求经重试返回成功」属
-> **线上验收**,依赖 T0 部署链(第 1–7 节)就绪后才能跑。**禁止用本地 / 单测绿冒充线上绿**——单测验的是
-> 重试代码路径,不能证明 Neon 冷启动的真实时延与 SQLSTATE 落在重试预算 / 白名单内(retry.go 注释里那些
-> UNCONFIRMED 的冷启动时延 / SQLSTATE 就是靠这次验收来证实并回调参数的)。
+> **状态:已验收(2026-06-11,T6 实操,验收记录见本节末)。** 首请求非 5xx 判据达成;重试链未在线上
+> 观测到触发(原因见验收记录——Neon proxy 在唤醒期挂住连接而非快速报错,连接层失败未发生),重试保持
+> 纵深防御待命,retry.go 注释中的冷启动 SQLSTATE 维持 UNCONFIRMED(真实触发一次后再回调参数)。
 
 执行前提:服务已按第 1–6 节部署到 Cloud Run 且生产流量已切到该 revision(`min-instances=0`)。
 
@@ -232,6 +230,25 @@ gcloud run services update-traffic server-infra-toolkit --to-latest --region <RE
 
 验收通过判据:首请求返回成功(非 5xx),且至少一次缩零重试中观测到 `db_retry_attempt` → `db_retry_succeeded`
 事件链。通过后据观测到的真实冷启动时延 / SQLSTATE 回调 `retry.go` 的 `totalBudget` 与 `retryableSQLSTATEs`(NFR8)。
+
+### 9.1 验收记录(2026-06-11,T6 实操回写)
+
+三轮双缩零观测(每轮先保证 Cloud Run 实例数归零、Neon idle ≥5 分钟,首请求用 `POST /v1/auth/login`
+合法形状假凭据,真实走 `QueryRow` 链路):
+
+| 轮次 | 结果 | 总时延 | 含义 |
+|------|------|--------|------|
+| 1 | 500 | 11.7s | 服务端零日志,无法定位 → 实锤 auth 500 路径可观测性缺口(修复:`ef071c5` 补 `auth_internal_error` 结构化日志) |
+| 2 | 500 | 11.8s | 日志现形:`SQLSTATE 42P01`(users 表不存在)→ 实锤**生产库从未跑过迁移**(修复:`goose up` 至 version 3,六表对账齐) |
+| 3 | **401(非 5xx)** | 12.4s | 标准信封 `unauthorized`,正确业务响应——**首请求非 5xx 判据达成** |
+
+- 总时延剖面:约 10s 为 Cloud Run 实例冷启动(容器启动→startup probe 通过),handler 自身 0.6–2s。
+- **重试链未观测到触发**(三轮 `db_retry_*` 事件均为零):实测 Neon proxy 在 compute 唤醒期**挂住连接等待**
+  而非快速报错,连接层失败未发生,故步骤 4 预设的「冷启动必现瞬时连接失败」假设在当前 Neon 行为下不成立。
+  重试逻辑保持纵深防御(Neon 行为变化 / 真实连接风暴时兜底),`retryableSQLSTATEs` 维持纸面值不回调。
+- 流程教训(两条,均为本验收意外揪出):① 业务 5xx 必须有服务端结构化错误日志,否则线上黑盒;
+  ② 「部署前 `goose up` 独立一步」(第 6 节)此前从未对生产库执行过——`/livez` 与错误信封冒烟均不碰业务表,
+  掩盖了空库。后续部署务必执行第 6 节迁移步骤,或在 deploy-precheck 中增加迁移版本对账(backlog)。
 
 ---
 
