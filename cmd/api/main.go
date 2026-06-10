@@ -15,6 +15,7 @@ import (
 
 	apphttp "github.com/shaomingbo/server-infra-toolkit/internal/http"
 	"github.com/shaomingbo/server-infra-toolkit/internal/modules/auth"
+	"github.com/shaomingbo/server-infra-toolkit/internal/modules/observability"
 	"github.com/shaomingbo/server-infra-toolkit/internal/platform/config"
 	"github.com/shaomingbo/server-infra-toolkit/internal/platform/db"
 	dbgen "github.com/shaomingbo/server-infra-toolkit/internal/platform/db/gen"
@@ -49,6 +50,14 @@ var _ auth.DB = (*db.Pool)(nil)
 // wrapped by it (it carries no DB call, AC8). Pinning the method-value type here
 // makes a drift in the middleware signature fail the build at the wiring seam.
 var _ func(stdhttp.Handler) stdhttp.Handler = (*auth.Handler)(nil).BearerMiddleware
+
+// Compile-time guard that the runtime pool also satisfies the observability
+// module's narrow DB seam (internal/modules/observability.DB). Like auth, the
+// module declares its own consumer-side interface and must not import the concrete
+// db package; this assertion lives here at the wiring seam — the one place that
+// may import both db and the module — so a signature drift between the pool and
+// the observability seam fails the build here rather than at NewHandler(pool).
+var _ observability.DB = (*db.Pool)(nil)
 
 func main() {
 	smoke := flag.Bool("smoke", false, "run a one-shot Neon SELECT 1 reachability check and exit (does not start the HTTP server)")
@@ -236,14 +245,28 @@ func run() error {
 	}
 
 	// Construct module handlers here, at the top level, and mount them via the
-	// NewServer route-registrar seam. This is the ONLY place auth is imported:
-	// internal/http never imports internal/modules/auth (frozen dependency
-	// direction). The auth handler takes the pool through its narrow DB seam.
+	// NewServer route-registrar seam. This is the ONLY place the modules are
+	// imported: internal/http never imports internal/modules/* (frozen dependency
+	// direction). Each handler takes the pool through its narrow DB seam.
 	authHandler := auth.NewHandler(pool)
+	registrars := []func(*stdhttp.ServeMux){authHandler.RegisterRoutes}
+
+	// Conditionally mount the observability event-ingestion endpoint behind the
+	// EVENTS_INGEST_ENABLED feature flag (FR1/AC9/D2). When the flag is off (the
+	// default) the registrar is NOT added, so POST /v1/events is never registered
+	// and a request to it hits the catch-all 404 — the endpoint is not exposed to
+	// the public until the client integrates. This is the deliberate seam-first
+	// state: the server-side logic is complete and tested, but the public surface
+	// stays closed (D2; the authentication/rate-limit last mile is set at client
+	// integration time).
+	if cfg.EventsIngestEnabled {
+		obsHandler := observability.NewHandler(pool)
+		registrars = append(registrars, obsHandler.RegisterRoutes)
+	}
 
 	srv := &stdhttp.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: apphttp.NewServer(cfg, pool, authHandler.RegisterRoutes),
+		Handler: apphttp.NewServer(cfg, pool, registrars...),
 		// Conservative timeouts: basic hardening for a publicly deployed server
 		// (slow-loris / idle-connection protection).
 		ReadHeaderTimeout: 5 * time.Second,

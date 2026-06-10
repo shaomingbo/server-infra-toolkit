@@ -33,3 +33,6 @@ vendor/
 .idea/
 .vscode/
 *.swp
+
+# Claude Code 临时 worktree(多代理编排残留,绝不入库)
+.claude/worktrees/

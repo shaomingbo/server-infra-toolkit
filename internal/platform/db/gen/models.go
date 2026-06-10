@@ -18,6 +18,19 @@ type AccessToken struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+// T5 observability: inbound events. UNIQUE(source,event_id) is the idempotency key (D5); received_at + received_at_idx are the time-friendly retention structure for T7 cleanup (no DELETE path here).
+type Event struct {
+	ID         int64
+	Source     string
+	EventID    string
+	Kind       string
+	TraceID    string
+	Name       string
+	EventTs    pgtype.Timestamptz
+	Attributes []byte
+	ReceivedAt pgtype.Timestamptz
+}
+
 // Infrastructure self-test carrier (T1 AC8). NOT a business table (NG1); safe to drop.
 type InfraSelftest struct {
 	ID    int32

@@ -129,3 +129,18 @@
 - **客户端校验(跨 repo)**:客户端仓库 `app-infra-toolkit` 在它自己的 CI 里消费此 schema 校验其解码器(跨 repo pin 由客户端侧负责维护,本仓库不承担客户端 pin 的同步)。
 - **真相源归属**:真相源留在服务端(本仓库 `internal/modules/auth/contract/`),客户端为消费方。本次变更为纯 append、非 migration note 级变更(未改写/删除任何既有冻结项,仅新增 schema 与人类摘要的主从约定)。
 - **新增测试依赖申报**:conformance 测试引入 `github.com/santhosh-tekuri/jsonschema/v6`(v6.0.2)做 schema 校验,**仅测试引用、不进生产二进制**。实测 `go mod tidy` 后本仓库 go.mod 仅新增这一个直接依赖;其模块图中的传递依赖未被本仓库引用面触及——`golang.org/x/mod`/`x/sys`/`x/text`/`x/tools` 均未因本次进入 go.mod/go.sum(go.mod 既有的 `x/sys`/`x/text` indirect 来自 pgx 链,与本次无关),仅 `github.com/dlclark/regexp2 v1.11.0` 因 jsonschema 自身测试引用它而落了两行 go.sum 校验和,不进 go.mod、不参与本仓库任何构建或测试二进制。
+
+---
+
+## 7. T5 范围声明(observability 事件接收站,纯 append)
+
+T5 给服务端新增 observability 事件接收模块(`internal/modules/observability/`):`POST /v1/events` 批量接收 Envelope 数组 → 入站 JSON Schema 校验 → 按 `(source,event_id)` 幂等去重 → 单事务批量落 `events` 新表。本节为纯 append,**未改写/删除任何既有冻结项**。
+
+- **错误信封(append-only,兑现 §4)**:T5 append 了两个 `code` 值——`payload_too_large`(413,请求体超 1 MiB 或单批超 500 条)、`rate_limited`(429,限流接缝拒绝时;noop 期不会真返回,码先 append 留位)。复用既有 `bad_request`(解析失败/schema 违规/空批/非数组)与 `internal`(500,DB 故障——必须 5xx 让客户端保批重试)。**信封顶层结构 `{"error":{"code","message"},"requestId"}` 不变**;批量校验的 rejected 计数放在错误信封 `message` 文本里(如 `"schema validation failed: 1 of 100 events rejected"`),**不**给信封 append 顶层字段。
+- **入站契约范式(T3 范式方向反转)**:T3 是服务端**产**响应 wire 自校;T5 是服务端**收**客户端产的请求 wire。服务端持「接受形状」入站 schema(真相源留服务端,与 T3 归属一致),conformance 测试测 handler 真实**拒绝**畸形输入(`additionalProperties:false` / `required` / `type` / `enum` / `AttributeValue` 闭集逐项咬),而非自校它从不产出的 Envelope。schema 文件在 `internal/modules/observability/contract/`(`event.schema.json` 单条事件七字段:其中 `eventId`/`kind`/`traceId`/`timestampMs`/`source`/`name` 六个必填,`attributes` 可选——缺省视同空对象,客户端 init 默认空 map;`batch.schema.json` 数组级不变量),go:embed 编进二进制 + 包级一次性编译 fail-closed(删 schema → 编译失败)。
+- **wire 暂不进 frozen 集(unstable,D9)**:T5 的 Envelope 单条形状(`eventId`/`kind`/`traceId`/`timestampMs`/`source`/`name`/`attributes` 七字段,前六个必填、`attributes` 可选缺省视同空对象)与批量请求/响应 wire(裸 JSON 数组请求、`{accepted,duplicate,rejected,requestId}` 响应)**暂标 unstable,不纳入 §1 frozen 集**——客户端 `app-infra-toolkit` 0.1.0 未发布,对端真实消费验证后才冻结(roadmap NFR6,防过早固化错误设计)。
+- **模块落点与依赖方向(兑现 §1.3 包依赖方向)**:`internal/modules/observability/` 照 auth 先例(`Handler{store}`+`NewHandler(pool)`+`RegisterRoutes(mux)`,经 `NewServer` 的 registrar-callback 挂接,`cmd/api/main.go` 唯一 wiring,编译期 `var _ observability.DB = (*db.Pool)(nil)` 守卫)。模块**不 import** `internal/http`(错误信封本地渲染,字节钉桩与 `internal/http.WriteError` 一致)、**不 import** `internal/modules/auth`(认证挂点只在 `cmd/api`);`internal/http` 不 import 本模块。`go list -deps` 守卫测试强制。
+- **端点默认 feature flag 关、不公网暴露(接缝先行,D2)**:`POST /v1/events` 默认**不挂公网路由**——`cmd/api` 仅当环境变量 `EVENTS_INGEST_ENABLED == "true"` 时才把模块 registrar 传入 `NewServer`,关时路由不注册、请求命中 catch-all 404。这是接缝先行的**有意状态**:服务端逻辑完整落地 + 集成测试覆盖,但公网面暂闭,认证/限流最后一公里待客户端接入定。限流为 `RateLimiter` facade(`Allow(ctx,key)` 同 auth 形状)+ noop 默认,**进程内限流非安全边界**(scale-zero 下最坏 2× + 冷启动重置),账单天花板靠 FR5 请求体/条数硬上限(独立于 max-instances)。
+- **保留清理划 T7**:`events` 表带 `received_at` + 时间友好索引(`events_received_at_idx`),便于 T7 按时间 drop;T5 **不实现** DELETE/清理代码路径(模块内零清理)。去重窗口 = 保留周期(同表 `UNIQUE(source,event_id)` 副产品,不另建独立去重表)。
+- **自身遥测走 stdout(FR12)**:模块每批接收完成后以 slog JSON 打一条 `events_ingested`(accepted/duplicate/rejected/批大小/request_id)到 stdout,**绝不回写 `events` 表**(防递归/放大)。
+- **迁移**:`00003_events.sql` 纯新增,前滚不回退,破坏性 Down(`DROP TABLE events`)标 `IRREVERSIBLE`;sqlc gen 过漂移 gate、迁移从 version 0 round-trip 通过。

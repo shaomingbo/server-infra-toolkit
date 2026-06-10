@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shaomingbo/server-infra-toolkit/internal/modules/observability/contract/event.schema.json",
+  "title": "InboundEvent",
+  "description": "Wire shape of a SINGLE inbound observability Envelope accepted by POST /v1/events (T5). This is the server's ACCEPTED-shape schema: the conformance tests drive malformed instances through the real handler validation path to prove it REJECTS them (T3 paradigm inverted to inbound; see PRD D3). All field names are camelCase, mirroring the client EventModels (kind/traceId/timestampMs/source/name/attributes), plus a server-required eventId idempotency key. The wire is UNSTABLE (PRD D9): not in the CONTRACTS frozen set until the client publishes and consumes it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eventId", "kind", "traceId", "timestampMs", "source", "name"],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["log", "crash", "telemetry"]
+    },
+    "traceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "attributes": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "type": ["string", "integer", "number", "boolean", "null"],
+        "maxLength": 1024
+      }
+    }
+  }
+}

@@ -148,3 +148,30 @@ func TestNotFound_Envelope(t *testing.T) {
 		t.Fatalf("envelope requestId %q != header %q", env.RequestID, headerID)
 	}
 }
+
+// TestEventsIngest_NotMountedWhenFlagOff pins the seam-first feature-flag behavior
+// (FR1/AC9/D2): when the EVENTS_INGEST_ENABLED flag is off, main does not pass the
+// observability registrar to NewServer, so POST /v1/events is never registered and
+// hits the catch-all 404. testServer() registers no module routes — exactly the
+// flag-off wiring — so a POST here proves the route does not exist by default. This
+// lives in package http (not the observability module) precisely so it does NOT
+// import internal/modules/observability, keeping the frozen dependency direction
+// intact (internal/http never imports a module).
+func TestEventsIngest_NotMountedWhenFlagOff(t *testing.T) {
+	srv := testServer()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/events", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("POST /v1/events status = %d, want 404 (route must not be mounted when the flag is off)\nbody=%s", rec.Code, rec.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if env.Error.Code != CodeNotFound {
+		t.Fatalf("error code = %q, want %q (the disabled endpoint is indistinguishable from any unknown route)", env.Error.Code, CodeNotFound)
+	}
+}

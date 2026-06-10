@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shaomingbo/server-infra-toolkit/internal/modules/observability/contract/batch.schema.json",
+  "title": "InboundEventBatch",
+  "description": "Wire shape of a POST /v1/events request body (T5): a bare JSON ARRAY of inbound Envelopes (FR1). This schema pins ONLY the ARRAY-LEVEL invariants: it must be an array, minItems 1 rejects the empty batch, maxItems 500 is the per-request count ceiling (the request-body byte ceiling is enforced separately by MaxBytesReader in S2). It deliberately does NOT $ref event.schema.json into items: per-event field validation is done by the handler against event.schema.json ELEMENT BY ELEMENT, so an invalid event can be COUNTED (rejected count, PRD FR10/AC4) rather than collapsing the whole batch into a single array-level failure. The two schemas derive from the same event contract, so they cannot diverge.",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 500
+}

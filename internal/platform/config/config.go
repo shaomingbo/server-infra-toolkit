@@ -37,12 +37,22 @@ func (s Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
 // Reveal returns the real underlying secret value.
 func (s Secret) Reveal() string { return string(s) }
 
-// Config holds the runtime configuration for T0. It intentionally contains only
-// the three fields the service needs today.
+// Config holds the runtime configuration. It intentionally stays minimal,
+// reading only from environment variables (frozen contract: os.Getenv + .env,
+// no flag/config-file/remote source).
 type Config struct {
 	Port    string
 	Version string
 	DSN     Secret
+
+	// EventsIngestEnabled gates the T5 observability event-ingestion endpoint
+	// (POST /v1/events). It defaults to FALSE: the endpoint stays off the public
+	// router until the client integrates (D2, seam-first — exposing a public
+	// write-to-DB endpoint with no client traffic is an attack surface with no
+	// upside). main only mounts the observability registrar when this is true; a
+	// false value means the route is never registered and a request hits the
+	// catch-all 404.
+	EventsIngestEnabled bool
 }
 
 // Load reads configuration from environment variables. For local development it
@@ -67,7 +77,8 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		Port: port,
-		DSN:  Secret(dsn),
+		Port:                port,
+		DSN:                 Secret(dsn),
+		EventsIngestEnabled: os.Getenv("EVENTS_INGEST_ENABLED") == "true",
 	}, nil
 }
