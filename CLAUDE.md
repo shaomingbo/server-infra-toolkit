@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 module path:`github.com/shaomingbo/server-infra-toolkit`(已冻结,不可改)。
 
-按 ROI 排序的推进站:**T0** 线上最小闭环 →(已落地)**T1** 数据接入层 →(已落地)**T2** auth →(已落地)**T3** 契约对账 →(已落地)T4 离线包 → T5 事件接收 → T6 部署加固。每个推进站另起 session 用 design-gate-lite 锻造独立 PRD 后落地,PRD 落在 `product-requirements/<station>/`。
+按 ROI 排序的推进站:**T0** 线上最小闭环 →(已落地)**T1** 数据接入层 →(已落地)**T2** auth →(已落地)**T3** 契约对账 →(已落地)**T5** 事件接收(ROI 复评先于 T4 落地,接缝先行未公网暴露)→(已落地)T4 离线包 → T6 部署加固。每个推进站另起 session 用 design-gate-lite 锻造独立 PRD 后落地,PRD 落在 `product-requirements/<station>/`。
 
 ## 常用命令
 
