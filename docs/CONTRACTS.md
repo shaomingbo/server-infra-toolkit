@@ -145,6 +145,17 @@ T5 给服务端新增 observability 事件接收模块(`internal/modules/observa
 - **自身遥测走 stdout(FR12)**:模块每批接收完成后以 slog JSON 打一条 `events_ingested`(accepted/duplicate/rejected/批大小/request_id)到 stdout,**绝不回写 `events` 表**(防递归/放大)。
 - **迁移**:`00003_events.sql` 纯新增,前滚不回退,破坏性 Down(`DROP TABLE events`)标 `IRREVERSIBLE`;sqlc gen 过漂移 gate、迁移从 version 0 round-trip 通过。
 
+### 7.1 T5 认证升级说明(事件接收认证,纯 append)
+
+T5 接缝先行留下的「认证待定」自本节定稿落地(PRD `product-requirements/t5-events-ingest-auth/`)。本节为纯 append,未改写/删除任何既有冻结项;§7 正文「认证/限流最后一公里待客户端接入定」的表述自此由本节收口。
+
+- **认证契约**:`POST /v1/events` 要求专用 header **`X-Ingest-Token`**(静态共享 ingest token,64 字符 hex);缺失/不匹配 → **401 + 复用既有 `unauthorized` code**(T2 已 append 的 code,本次零新增 code,信封顶层结构不变,兑现 §4 append-only)。缺 header 与错 token 响应逐字节一致(对外不可区分,同 §6 反枚举纪律)。
+- **服务端凭据形态**:env `EVENTS_INGEST_TOKEN_SHA256S`(1-2 个逗号分隔的小写 64-hex SHA-256 哈希,`current[,previous]` 双哈希零丢失轮换),**只存哈希不存明文**;哈希口径 `hex(sha256(utf8_bytes(token)))`,锚定测试钉死双端口径(样例对同步在 T5 客户端交接物 §1)。
+- **fail-closed 耦合**:`EVENTS_INGEST_ENABLED=true` 且哈希列表空/缺失 → `config.Load()` 报错拒绝启动(不存在「开着门没锁」状态);flag 关 + 哈希已配 = 合法预配置。config 机制仍只用 `os.Getenv`+`.env`(兑现 §1.3#4)。
+- **verifier 落点(依赖方向不变)**:认证以 `func(http.Handler) http.Handler` 形态落**装配层**——定义在 `internal/http`(WriteError/中间件所在的 HTTP 装配层),由 `cmd/api` 完成挂载,只包 `POST /v1/events`(非 POST 不经认证,落 ServeMux catch-all 回 404——catch-all 掩盖 405 合成属 Go ServeMux 既定行为,且不泄露端点存在);`internal/modules/observability` 模块自身零改动,不 import `internal/modules/auth`、不触 `access_tokens`(§7 依赖方向守卫全部维持)。探针与 auth 端点行为不变。
+- **拒绝可观测**:每次 401 打 slog JSON `ingest_auth_rejected`(含 request_id,绝不含 token / header 原文)到 stdout。
+- **威胁模型定位(安全契约)**:本认证是**粗门禁**(挡扫描器/误请求),token 嵌于公开客户端可被提取,不构成反滥用边界;速率封顶归 T6 边缘层。**公网翻开 `EVENTS_INGEST_ENABLED` 的前置条件 = 边缘层真实限流落地**(红线,运维流程见 `docs/DEPLOY.md §15`)。
+
 ---
 
 ## 8. T6 范围声明(部署加固站,纯 append)

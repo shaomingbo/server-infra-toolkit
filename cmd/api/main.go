@@ -245,6 +245,38 @@ func runUnlock() error {
 	return nil
 }
 
+// ingestVerifierRegistrar wraps a route registrar so the events route it mounts is
+// gated by the supplied verifier middleware. It lets the inner registrar declare
+// its routes on a private sub-mux, then mounts the verifier-wrapped sub-mux onto
+// the real mux under the SAME method+path pattern ("POST /v1/events"). The effect
+// is that the verifier runs in front of exactly that route and nothing else, so
+// /livez and /v1/auth/* (registered by other registrars) are untouched (AC8). The
+// verifier runs INSIDE the request-id / access-log chain that NewServer wraps the
+// mux with, so RequestIDFromContext is populated when it writes the 401 envelope.
+//
+// HONESTY NOTE: the outer pattern is a single hardcoded literal ("POST /v1/events"),
+// NOT derived from whatever patterns the inner registrar declared — observability
+// only mounts that one route today, so the two are kept in lockstep by hand. The
+// method pattern means a non-POST to /v1/events does NOT enter the verifier (it
+// never sees a GET, so no 401 and no rejection log for non-POST); such a request
+// falls through to NewServer's catch-all and gets the 404 envelope. If
+// observability ever adds a SECOND ingest route, this function must be updated to
+// mount the verifier in front of that route too — it will not pick it up
+// automatically.
+func ingestVerifierRegistrar(verifier func(stdhttp.Handler) stdhttp.Handler, inner func(*stdhttp.ServeMux)) func(*stdhttp.ServeMux) {
+	return func(mux *stdhttp.ServeMux) {
+		sub := stdhttp.NewServeMux()
+		inner(sub)
+		// Mount the verifier-wrapped sub-mux under the events route's exact
+		// method+path pattern (Go 1.22+ method pattern). Restricting to POST means the
+		// outer ServeMux routes only POST /v1/events into the verifier; a GET/HEAD/etc.
+		// to the same path never reaches the verifier (no 401, no rejection log) — it
+		// falls through to the catch-all 404 instead. PRD FR1 scopes the endpoint to
+		// POST, so this aligns the guarded surface with the contract.
+		mux.Handle("POST /v1/events", verifier(sub))
+	}
+}
+
 func run() error {
 	// Resolve the effective version: prefer the ldflags-injected value, falling
 	// back to the Cloud Run revision when running an unstamped ("dev") build.
@@ -290,7 +322,16 @@ func run() error {
 	// integration time).
 	if cfg.EventsIngestEnabled {
 		obsHandler := observability.NewHandler(pool)
-		registrars = append(registrars, obsHandler.RegisterRoutes)
+		// Gate the observability routes (POST /v1/events) behind the T5 ingest-token
+		// verifier (FR4/D5). The verifier is an assembly-layer middleware in
+		// internal/http — the observability module never imports it and never sees an
+		// auth dependency (AC7). ingestVerifierRegistrar wraps obsHandler.RegisterRoutes
+		// so ONLY the events route is guarded: /livez and /v1/auth/* are registered by
+		// other registrars and never pass through the verifier (AC8). The accepted-hash
+		// slice is captured once here from config (current[,previous]); fail-closed
+		// coupling in config.Load guarantees it is non-empty when the flag is on (AC1).
+		verifier := apphttp.IngestVerifier(cfg.EventsIngestTokenSHA256s)
+		registrars = append(registrars, ingestVerifierRegistrar(verifier, obsHandler.RegisterRoutes))
 	}
 
 	srv := &stdhttp.Server{

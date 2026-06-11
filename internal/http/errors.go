@@ -14,6 +14,12 @@ const (
 	CodeInternal   = "internal"
 	CodeBadRequest = "bad_request"
 	CodeNotFound   = "not_found"
+	// CodeUnauthorized is the credential-failure slug. It mirrors the value the
+	// auth module emits locally (codeUnauthorized) and is reused by the ingest
+	// verifier (FR5/D4: 401 reuses the existing "unauthorized" code, no new code).
+	// This is an append-only addition; the error envelope's top-level shape is
+	// unchanged (CONTRACTS frozen envelope).
+	CodeUnauthorized = "unauthorized"
 )
 
 // errorEnvelope is the frozen top-level shape of every error response.

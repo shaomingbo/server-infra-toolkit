@@ -483,3 +483,58 @@ grep -rnE '\b[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}\b' . \
 **判据**:四条命令(套用白名单 `grep -v` 后)**全部无输出**即通过(AC10)。
 
 ---
+
+## 15. Ingest token 运维(T5 认证,对应 t5-events-ingest-auth AC12 / D3 / D7 / R2)
+
+> `/v1/events` 的静态共享 ingest token:服务端只存 SHA-256 哈希(env `EVENTS_INGEST_TOKEN_SHA256S`),明文 token 由明博生成后带外交客户端,**明文不进 git、不进文档、不进服务端任何存储**。
+
+### 15.1 生成 token 与哈希
+
+```bash
+# 1. 生成 64 字符 hex token(明文只在本地终端出现一次,交付客户端后不留存)
+openssl rand -hex 32
+
+# 2. 计算其 SHA-256 哈希(printf '%s' 防尾换行混入口径;只有哈希进服务端配置)
+printf '%s' '<TOKEN_PLAINTEXT>' | shasum -a 256
+```
+
+哈希口径 = `hex(sha256(utf8_bytes(token)))` 小写,与 config 包锚定测试、T5 客户端交接物 §1 样例对同源。
+
+> **⚠️ 手滑自查**:若 shasum 输出以 `e3b0c442` 开头,说明对**空输入**做了哈希(变量没设/引号写错)——这个值 config 会直接拒收(空串的 SHA-256 是公知常量,配进去等于缺 header 也放行,服务端已 fail-closed 拦死)。
+
+### 15.2 配置(env)
+
+```bash
+# 本地 .env(开发);Cloud Run 用 --set-env-vars 或控制台同名 env var
+EVENTS_INGEST_TOKEN_SHA256S=<CURRENT_HASH>            # 单哈希常态
+EVENTS_INGEST_TOKEN_SHA256S=<NEW_HASH>,<OLD_HASH>     # 轮换过渡期(current,previous)
+```
+
+- 哈希不是 secret 级敏感(拿到哈希推不出 token),普通 env var 即可,不必进 Secret Manager;但也不主动外泄。
+- **fail-closed,两种拒启动**:① `EVENTS_INGEST_ENABLED=true` 而哈希缺失 → 拒绝启动;② 哈希值非法(非 1-2 个逗号分隔的小写 64-hex)→ **无论 flag 开关都拒绝启动**(设了值就必须合法)。改完 env 先看启动日志确认没被 config 拒掉,再做后续验证。
+
+### 15.3 双哈希零丢失轮换流程(R2)
+
+1. 生成新 token + 新哈希(§15.1)。
+2. env 改为 `<NEW_HASH>,<OLD_HASH>` → 部署新 revision(蓝绿,§4b)。新旧 token 此刻都有效,零丢失窗口打开。
+3. 新 token 带外交客户端,客户端发版/配置切换。
+4. **所有已发布客户端版本完成迁移后**,env 收缩回 `<NEW_HASH>` 单哈希 → 再部署。过早移除 previous = 长尾旧客户端 401(客户端按交接物 §5 有界 hold 后丢事件)。
+5. 泄露应急:跳过第 3 步的等待,直接 `<NEW_HASH>` 单哈希部署(立即踢掉泄露 token,接受未迁移客户端掉事件)。
+
+### 15.4 公网翻开 `EVENTS_INGEST_ENABLED` 的前置红线(D7)
+
+**本认证是粗门禁,不是反滥用边界**——token 嵌在公开 app 里可被逆向提取,进程内限流又是 noop。因此:
+
+- **翻开 flag 公网暴露前,必须先落地边缘层真实限流**(Cloud Armor / API Gateway 级速率封顶,T6 边缘层职责)。
+- 此前唯一的账单天花板是单请求硬上限(1 MiB / 500 条),挡不住高频灌注。
+- 例外仅一种:明博显式接受无限流公网暴露的账单风险(PRD D7 override)。
+
+### 15.5 翻开 flag 当日 checklist
+
+1. 边缘层限流已落地(§15.4 红线)。
+2. `EVENTS_INGEST_TOKEN_SHA256S` 已配,启动日志确认 config 通过(§15.2)。
+3. 客户端已实现 `X-Ingest-Token` 注入 + 401 有界 hold(交接物 §1/§5)。
+4. 部署后冒烟:无 token POST `/v1/events` → 401;带 token + 合法批 → 200。
+5. 观察 `ingest_auth_rejected` 日志量基线,异常暴涨 = 有人探测,考虑轮换(§15.3)。
+
+---
