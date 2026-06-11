@@ -33,7 +33,7 @@
 - [ ] Artifact Registry repo 就绪(Docker 仓库,路径
       `<REGION>-docker.pkg.dev/<PROJECT_ID>/<AR_REPO>`),且本地已 `gcloud auth configure-docker <REGION>-docker.pkg.dev`。
 
-**上面四类高频配置错误(IAM 授权 / secret 可读 / 镜像已推 / DSN 含 sslmode)有只读自动化拦截**——构建推镜像(第 3 节)后、部署(第 4 节)前跑一次:
+**上面四类高频配置错误(IAM 授权 / secret 可读 / 镜像已推 / DSN 含 sslmode)加上「迁移版本对账」共五项,有只读自动化拦截**——构建推镜像(第 3 节)后、部署(第 4 节)前跑一次:
 
 ```bash
 ./scripts/deploy-precheck.sh             # 检查当前 HEAD 对应的镜像 tag
@@ -41,7 +41,8 @@
 ```
 
 - 脚本**只读、幂等、绝不做任何 gcloud 写操作**(D6),属手动部署链(与 `build.sh` / `smoke.sh` 同列),**不进 `verify.sh`、不进 CI**(部署链 ≠ CI gate,见 CONTRACTS.md §8)。
-- 退出码语义:`0` 四项全过;`1` 某项**配置缺失**(输出指明缺哪项,去补齐);`3` **凭据缺失**(gcloud 没装 / 未认证 —— 与配置缺失区分,见 PRD E3,先 `gcloud auth login` 再重跑)。
+- 退出码语义:`0` 五项全过;`1` 某项**配置缺失**(输出指明缺哪项,去补齐);`3` **凭据缺失**(gcloud 没装 / 未认证 —— 与配置缺失区分,见 PRD E3,先 `gcloud auth login` 再重跑)。
+- 第 5 项(迁移版本对账)对账**云端 DSN 指向的生产库** goose 版本与 `db/migrations/` 最新序号,拦"代码部署了但 `goose up` 没跑"(§9.1 流程教训的落地)。唯一已知副作用:对**从未迁移过**的库,goose 查版本会自动建一张空的版本表(无业务影响,随后对账会大声报红引导跑第 6 节)。
 - 坐标零硬编码:project 取自 `gcloud config`、运行时 SA 由 project number 推导、`IMAGE_REPO` 取自本地 `.env`,脚本里无任何真实坐标(NFR2)。
 
 ---
@@ -248,7 +249,7 @@ gcloud run services update-traffic server-infra-toolkit --to-latest --region <RE
   重试逻辑保持纵深防御(Neon 行为变化 / 真实连接风暴时兜底),`retryableSQLSTATEs` 维持纸面值不回调。
 - 流程教训(两条,均为本验收意外揪出):① 业务 5xx 必须有服务端结构化错误日志,否则线上黑盒;
   ② 「部署前 `goose up` 独立一步」(第 6 节)此前从未对生产库执行过——`/livez` 与错误信封冒烟均不碰业务表,
-  掩盖了空库。后续部署务必执行第 6 节迁移步骤,或在 deploy-precheck 中增加迁移版本对账(backlog)。
+  掩盖了空库。后续部署务必执行第 6 节迁移步骤;deploy-precheck 已增加第 5 项「迁移版本对账」兜底(2026-06-11 落地)。
 
 ---
 
