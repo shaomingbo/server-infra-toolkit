@@ -1,0 +1,435 @@
+{
+  "slug": "t5-events-ingest-auth",
+  "source_type": "design_decision",
+  "mode": "L2",
+  "title": "T5 事件接收认证(/v1/events 最后一公里)",
+  "summary": "为 POST /v1/events 定稿并落地静态共享 ingest token 认证:专用 header X-Ingest-Token,服务端 env 只存 SHA-256 哈希(双哈希零丢失轮换),配置缺失拒绝启动,校验先于 body 读取;同步修订 client-handoff/CONTRACTS/DEPLOY。定位为粗门禁,速率封顶划归 T6 边缘层。",
+  "goal_alignment": {
+    "status": "clear",
+    "target_user": "app-infra-toolkit 双端客户端的事件上报链路(直接消费方);明博作为唯一运维(轮换/关断操作者)",
+    "problem": "client-handoff §1 的认证标'待定',是客户端接入清单的最后一个前置依赖,不定它客户端联调无法开工",
+    "success_outcome": "认证契约定稿且服务端落地:客户端拿到确定的 header 名/凭据形态/状态码动作表/轮换纪律,client-handoff §1 的'待定'消除",
+    "scope_boundary": "服务端认证实现+三份文档同步;不含客户端实现、不翻 EVENTS_INGEST_ENABLED、不做真实限流(T6)、不做设备级凭据",
+    "first_acceptance_signal": "verify.sh 绿且缺 token 的 POST /v1/events 返回 401 标准信封",
+    "confidence": "high",
+    "alternatives_considered": []
+  },
+  "goals": [
+    "G1 认证契约定稿:header 名、凭据形态、哈希口径、状态码语义、轮换纪律全部写死",
+    "G2 服务端落地:校验逻辑+fail-closed 配置守卫+拒绝日志,verify.sh 全绿",
+    "G3 客户端可开工:client-handoff 修订到客户端无需再问任何认证问题的程度"
+  ],
+  "non_goals": [
+    "NG1 不做设备级凭据/enroll 端点",
+    "NG2 不做真实速率限制(T6 边缘层职责)",
+    "NG3 不翻 EVENTS_INGEST_ENABLED(公网暴露时机由明博手动,有 D7 前置红线)",
+    "NG4 不改事件 wire 形状",
+    "NG5 不防客户端二进制逆向提取 token(威胁模型定位)"
+  ],
+  "assumptions": [
+    {
+      "id": "A1",
+      "text": "客户端 0.1.0 未发布,T5 wire(含认证 header)处于 unstable 低成本修改窗口",
+      "confidence": "high"
+    },
+    {
+      "id": "A2",
+      "text": "客户端 BatchUploader 当前把一切 4xx 当永久丢弃,401 动作表修订需客户端侧实现配合(有界 hold)",
+      "confidence": "high"
+    },
+    {
+      "id": "A3",
+      "text": "单人项目无多租户/多设备撤销需求;出现时走 D1 override 另起 PRD",
+      "confidence": "medium"
+    },
+    {
+      "id": "A4",
+      "text": "T6 边缘层限流是公网翻开 flag 前的独立前置工作,不在本 PRD 交付",
+      "confidence": "high"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "FR1",
+      "type": "functional",
+      "description": "POST /v1/events 要求专用 header X-Ingest-Token,token 为运维生成的 64 字符 hex 串(openssl rand -hex 32)"
+    },
+    {
+      "id": "FR2",
+      "type": "functional",
+      "description": "服务端对 header 值的 UTF-8 字节做 SHA-256 得 hex,与 EVENTS_INGEST_TOKEN_SHA256S(1-2 个逗号分隔哈希,current[,previous])做常数时间比较;服务端不存明文"
+    },
+    {
+      "id": "FR3",
+      "type": "functional",
+      "description": "fail-closed:EVENTS_INGEST_ENABLED=true 且哈希列表空/缺失时 config.Load() 返回错误,进程退出不监听端口"
+    },
+    {
+      "id": "FR4",
+      "type": "functional",
+      "description": "verifier 为 func(http.Handler) http.Handler,装配层只包 observability 路由;只读 header,失败不读 body;不查 access_tokens、不 import auth"
+    },
+    {
+      "id": "FR5",
+      "type": "functional",
+      "description": "认证失败返回 401+既有 unauthorized code 标准信封;缺 header 与错 token 响应体逐字节一致"
+    },
+    {
+      "id": "FR6",
+      "type": "functional",
+      "description": "每次 401 拒绝打结构化日志 event=ingest_auth_rejected(含 request_id,绝不含 token 值或 header 原文)"
+    },
+    {
+      "id": "FR7",
+      "type": "functional",
+      "description": "client-handoff 修订:§1 认证定稿(header 名/分发/哈希口径样例对/轮换纪律);§5 动作表补 401 行(有界 hold:至多 3 次+指数退避,超界丢);注入规则(/v1/events 注入 X-Ingest-Token 绝不注入 Authorization,token 源独立于 LoginManager)"
+    },
+    {
+      "id": "FR8",
+      "type": "functional",
+      "description": "CONTRACTS T5 节 append 认证契约;DEPLOY 新增 ingest token 运维节(生成/配置/轮换/公网翻开前置红线)"
+    },
+    {
+      "id": "NFR1",
+      "type": "non_functional",
+      "description": "零新增:不加表、不加迁移、不加 Go 依赖、不加新 GCP 资源"
+    },
+    {
+      "id": "NFR2",
+      "type": "non_functional",
+      "description": "observability 模块自身零改动(或仅注释级);依赖方向守卫测试保持绿"
+    },
+    {
+      "id": "NFR3",
+      "type": "non_functional",
+      "description": "威胁模型定位文档化:本认证=粗门禁;速率封顶=T6 边缘层;公网翻开 flag 前置条件=真实限流落地"
+    },
+    {
+      "id": "NFR4",
+      "type": "non_functional",
+      "description": "token 明文零入库:repo/git 历史/服务端日志/错误信息均不出现明文(env 只有哈希)"
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "description": "EVENTS_INGEST_ENABLED=true 且 EVENTS_INGEST_TOKEN_SHA256S 未设或为空时,config.Load() 返回错误且进程以非 0 退出码终止、不监听端口",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "FR3"
+      ]
+    },
+    {
+      "id": "AC2",
+      "description": "配置 current+previous 两个哈希时,携带任一对应 token 的请求通过认证;移除 previous 后旧 token 请求返回 401",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "FR2"
+      ]
+    },
+    {
+      "id": "AC3",
+      "description": "缺 X-Ingest-Token header 与携带错误 token 的请求均返回 401+unauthorized code 标准信封,且两种情况响应体字节级一致",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "FR5"
+      ]
+    },
+    {
+      "id": "AC4",
+      "description": "携带 2 MiB 请求体的未认证请求返回 401(非 413),且服务端未读取请求体、未执行 schema 校验与数据库写入",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "FR4"
+      ]
+    },
+    {
+      "id": "AC5",
+      "description": "每次 401 拒绝向 stdout 输出一条 JSON 日志,event 字段为 ingest_auth_rejected、含 request_id 字段,日志行内不出现 token 值或 header 原文",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "FR6"
+      ]
+    },
+    {
+      "id": "AC6",
+      "description": "认证通过后既有行为不变:internal/modules/observability 现有全部测试与 scripts/verify.sh 全量通过",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "NFR2"
+      ]
+    },
+    {
+      "id": "AC7",
+      "description": "verifier 类型为 func(http.Handler) http.Handler、定义在装配层、不 import internal/modules/auth、不查询 access_tokens 表;observability 依赖方向守卫测试通过",
+      "verifiable_by": "code_review",
+      "requirement_refs": [
+        "FR4",
+        "NFR2"
+      ]
+    },
+    {
+      "id": "AC8",
+      "description": "/livez 与 /v1/auth/login、/v1/auth/refresh 在不携带 X-Ingest-Token 时行为与现状一致(verifier 只作用于 /v1/events)",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "FR4"
+      ]
+    },
+    {
+      "id": "AC9",
+      "description": "哈希口径锚定测试:对写死的样例 token 断言 hex(sha256(utf8_bytes(token))) 等于写死的期望哈希;同一样例对写入 client-handoff §1",
+      "verifiable_by": "automated_test",
+      "requirement_refs": [
+        "FR2",
+        "FR7"
+      ]
+    },
+    {
+      "id": "AC10",
+      "description": "client-handoff §1 含确定的 header 名、token 分发方式、哈希口径样例对、轮换纪律(previous 保留至所有已发布客户端版本完成迁移);§5 动作表含 401 行且语义为有界 hold(上限次数+退避,超界丢弃)",
+      "verifiable_by": "code_review",
+      "requirement_refs": [
+        "FR7"
+      ]
+    },
+    {
+      "id": "AC11",
+      "description": "CONTRACTS T5 节 append 认证契约(header 名+401 语义+env 变量名),错误信封顶层结构零改动;全仓 grep 无 64 字符 hex token 明文入库",
+      "verifiable_by": "code_review",
+      "requirement_refs": [
+        "FR8",
+        "NFR4"
+      ]
+    },
+    {
+      "id": "AC12",
+      "description": "DEPLOY 新增 ingest token 节:生成命令、env 配置、双哈希轮换流程、公网翻开 EVENTS_INGEST_ENABLED 的前置条件=真实限流落地的红线声明",
+      "verifiable_by": "manual_check",
+      "requirement_refs": [
+        "FR8",
+        "NFR3"
+      ]
+    }
+  ],
+  "edge_cases": [
+    {
+      "id": "E1",
+      "description": "flag 关 + 哈希已配(预配置)",
+      "expected_behavior": "合法状态,端点仍 404,不报错"
+    },
+    {
+      "id": "E2",
+      "description": "flag 开 + 哈希空",
+      "expected_behavior": "启动失败(AC1),绝不进入无认证开放态"
+    },
+    {
+      "id": "E3",
+      "description": "哈希列表超过 2 个或含非法 hex",
+      "expected_behavior": "config.Load() 报错,与缺失同级处理"
+    },
+    {
+      "id": "E4",
+      "description": "轮换跨两代,长离线客户端 token 已不在窗口",
+      "expected_behavior": "401 → 客户端有界 hold 后丢弃;损失边界=该设备事件,见 R2"
+    },
+    {
+      "id": "E5",
+      "description": "header 值含空白或大小写差异",
+      "expected_behavior": "不做规范化,字节级原样哈希比较,差异即 401"
+    },
+    {
+      "id": "E6",
+      "description": "并发请求打在校验路径",
+      "expected_behavior": "哈希集启动时解析为不可变切片,无共享可变状态,无锁"
+    },
+    {
+      "id": "E7",
+      "description": "攻击者探测缺 header 与错 token 的响应差异",
+      "expected_behavior": "响应字节一致(AC3),不泄露 token 是否曾有效"
+    }
+  ],
+  "risks": [
+    {
+      "id": "R1",
+      "description": "嵌入公开 app 二进制的 token 可被提取,认证对定向滥用无效",
+      "impact": "high",
+      "likelihood": "medium",
+      "mitigation": "威胁模型定位写死(D7/NFR3);公网翻开前置真实限流红线(AC12);T6 边缘层承接速率封顶;单请求硬上限仍是单请求账单天花板",
+      "owner": "engineering"
+    },
+    {
+      "id": "R2",
+      "description": "轮换超出双哈希窗口的长离线客户端丢事件",
+      "impact": "medium",
+      "likelihood": "low",
+      "mitigation": "轮换纪律=previous 保留至客户端迁移完成(AC10);客户端 401 有界 hold 给恢复机会",
+      "owner": "engineering"
+    },
+    {
+      "id": "R3",
+      "description": "双端哈希口径不一致到联调期才发现",
+      "impact": "medium",
+      "likelihood": "medium",
+      "mitigation": "AC9 锚定测试+client-handoff 同一样例对",
+      "owner": "engineering"
+    },
+    {
+      "id": "R4",
+      "description": "客户端把 401 实现成无界重投或静默永久丢",
+      "impact": "medium",
+      "likelihood": "medium",
+      "mitigation": "动作表写死有界 hold 语义(AC10);接入联调时用轮换演练用例验证",
+      "owner": "engineering"
+    }
+  ],
+  "default_decisions": [
+    {
+      "id": "D1",
+      "decision": "选静态共享 token,不做设备级凭据",
+      "reason": "设备级方案的 enroll 端点自身是无认证 mint 面(攻击面更大)、撤销无设备标识纸面化、新表撞 schema 保守域、客户端需先落地 SecureStorage",
+      "override_if": "客户端 SecureStorage 落地且出现真实按设备撤销需求时另起 PRD(verifier 是单一咽喉点可平滑替换)"
+    },
+    {
+      "id": "D2",
+      "decision": "专用 header X-Ingest-Token,不复用 Authorization: Bearer",
+      "reason": "三路批判共振:复用 Bearer 会让客户端拦截器把 ingest token 误入自动刷新路径,服务端同 header 双语义易误导维护",
+      "override_if": "客户端拦截器架构重构使 Bearer 隔离成本为零时重议"
+    },
+    {
+      "id": "D3",
+      "decision": "env 存哈希非明文、双哈希轮换、耦合校验落 config.Load()",
+      "reason": "服务端配置面泄露不直接得到可用 token;双哈希消除轮换丢批窗口;Load 是唯一 env 读取面",
+      "override_if": "无"
+    },
+    {
+      "id": "D4",
+      "decision": "401 复用既有 unauthorized code,不新增 403/forbidden",
+      "reason": "新增永久语义 code 会被客户端 pin 死,锁死认证失败可恢复的演进路径;客户端动作由动作表定义不靠状态码二分猜",
+      "override_if": "未来确需区分永久拒绝语义时按 append-only 加 code"
+    },
+    {
+      "id": "D5",
+      "decision": "verifier 落装配层(cmd/api),不进 observability 模块",
+      "reason": "模块内实现需复制安全敏感比较代码(依赖守卫禁 import auth);装配层与 BearerMiddleware 同形挂载是已验证模式",
+      "override_if": "出现第二个需同类认证的非 auth 端点(rule-of-three)时抽象为共享组件"
+    },
+    {
+      "id": "D6",
+      "decision": "客户端 401 动作=有界 hold(建议至多 3 次+指数退避,超界丢弃)",
+      "reason": "无界重试=重投风暴(Codex 对抗审);永久丢=撞登录前崩溃上报 P0;有界 hold 是工程折中,参数属客户端实现域",
+      "override_if": "客户端联调实测后调参"
+    },
+    {
+      "id": "D7",
+      "decision": "反滥用速率封顶显式划归 T6 边缘层;公网翻开 EVENTS_INGEST_ENABLED 的前置条件=真实限流落地",
+      "reason": "redteam 共识:可提取凭据+noop 限流下认证不构成滥用边界,不写死会被误读为已防滥用",
+      "override_if": "明博显式接受无限流公网暴露的账单风险"
+    },
+    {
+      "id": "D8",
+      "decision": "token 生成=运维侧 openssl rand -hex 32,服务端无 mint 代码",
+      "reason": "单一共享凭据无需服务端生成路径,少一段代码少一个面",
+      "override_if": "无"
+    }
+  ],
+  "open_questions": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "description": "config 扩展:EVENTS_INGEST_TOKEN_SHA256S 解析(1-2 个逗号分隔 hex)+ flag⇒哈希耦合校验 + 配置测试",
+      "owner_agent": "implementer",
+      "deps": [],
+      "done_when": [
+        "AC1",
+        "AC9"
+      ]
+    },
+    {
+      "id": "T2",
+      "description": "装配层 ingest verifier:常数时间双哈希比较、401 信封、只挂 events 路由、先于 body 读取 + 行为测试",
+      "owner_agent": "implementer",
+      "deps": [
+        "T1"
+      ],
+      "done_when": [
+        "AC2",
+        "AC3",
+        "AC4",
+        "AC7",
+        "AC8"
+      ]
+    },
+    {
+      "id": "T3",
+      "description": "ingest_auth_rejected 结构化日志 + 日志字段测试(含不含 token 断言)",
+      "owner_agent": "implementer",
+      "deps": [
+        "T2"
+      ],
+      "done_when": [
+        "AC5"
+      ]
+    },
+    {
+      "id": "T4",
+      "description": "全量回归:observability/auth 既有测试 + verify.sh",
+      "owner_agent": "test-runner",
+      "deps": [
+        "T2",
+        "T3"
+      ],
+      "done_when": [
+        "AC6"
+      ]
+    },
+    {
+      "id": "T5",
+      "description": "文档三件套:client-handoff §1/§5 修订、CONTRACTS append、DEPLOY runbook 节",
+      "owner_agent": "main_coordinator",
+      "deps": [
+        "T2"
+      ],
+      "done_when": [
+        "AC10",
+        "AC11",
+        "AC12"
+      ]
+    },
+    {
+      "id": "T6",
+      "description": "双盲 review 闭环(reviewer + Codex 异源)+ 修复回归",
+      "owner_agent": "reviewer",
+      "deps": [
+        "T1",
+        "T2",
+        "T3",
+        "T4",
+        "T5"
+      ],
+      "done_when": [
+        "AC6",
+        "AC11"
+      ]
+    }
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/t5-events-ingest-auth/prd.md",
+    "handoff": "product-requirements/t5-events-ingest-auth/handoff.json"
+  },
+  "next_prompt": "按 product-requirements/t5-events-ingest-auth/prd.md 落地 T5 事件接收认证(走 PRD 协调流程):T1 config 扩展 → T2 装配层 verifier → T3 拒绝日志 → T4 全量回归 → T5 文档三件套 → T6 双盲 review 闭环。完成判据=12 条 AC 全过 + verify.sh 绿 + push CI 绿。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": [
+      "option-conservative",
+      "option-fast",
+      "option-longterm",
+      "architecture",
+      "implementation",
+      "requirement",
+      "redteam"
+    ],
+    "codex_used": true,
+    "codex_downgraded": false
+  }
+}
