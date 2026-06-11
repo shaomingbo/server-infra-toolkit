@@ -12,7 +12,7 @@
 
 ## 现状
 
-T0–T3、T5 与 T6 已落地:HTTP 壳 + `/livez` + 统一错误信封 + 结构化日志(T0)、连接池 + 重试 + sqlc/goose 工具链(T1)、login/refresh 认证 + 账户锁定防线(T2)、wire 契约 schema 真相源 + conformance 防线(T3)、observability 批量事件接收 + 入站契约校验 + 幂等落库(T5,接缝先行:端点默认挂 feature flag 后不公网暴露)、startup probe + 关停预算对账 + 部署前置校验 + 蓝绿/双缩零线上实走验收(T6)。中期 ROADMAP(按 ROI 排序)见:
+T0–T3、T5 与 T6 已落地:HTTP 壳 + `/livez` + 统一错误信封 + 结构化日志(T0)、连接池 + 重试 + sqlc/goose 工具链(T1)、login/refresh 认证 + 账户锁定防线(T2)、wire 契约 schema 真相源 + conformance 防线(T3)、observability 批量事件接收 + 入站契约校验 + 幂等落库 + ingest token 认证(T5,接缝先行:端点默认挂 feature flag 后不公网暴露;认证已定稿落地,公网翻开前置边缘限流红线)、startup probe + 关停预算对账 + 部署前置校验 + 蓝绿/双缩零线上实走验收(T6)。中期 ROADMAP(按 ROI 排序)见:
 
 - [`product-requirements/server-infra-roadmap/prd.md`](product-requirements/server-infra-roadmap/prd.md) — 完整 PRD(14 节)
 - [`product-requirements/server-infra-roadmap/handoff.json`](product-requirements/server-infra-roadmap/handoff.json) — 机器可读的任务与依赖清单
