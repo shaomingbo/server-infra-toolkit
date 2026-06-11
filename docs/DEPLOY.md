@@ -440,6 +440,8 @@ gcloud billing budgets create \
   ```
   或用 `--disable-default-iam-recipients` 关掉默认收件人后只走自定义渠道。
 - **测试通知未达 → 修通知渠道后重验**,不接受"创建成功就算完"(E2)。
+- **触达已验(2026-06-11,T6 实操)**:经临时 1HKD 测试预算实测,默认渠道告警邮件可达 billing admin 邮箱(条件满足后约 2 小时送达,符合评估周期预期;测试预算验后已删)。
+- **⚠️ 口径坑(实测教训)**:budget 默认口径 `INCLUDE_ALL_CREDITS` 按**抵扣后净额**算——免费层把毛费用抵扣到 0 时,阈值永不跨线、邮件永不触发。**测试触达必须用毛额口径**:`--credit-types-treatment=exclude-all-credits` + 低阈值(如 `percent=0.01`)。正式预算保持默认净额口径(语义正确:真要掏钱才告警)。
 
 ---
 
