@@ -1,8 +1,8 @@
-// Package auth is the T2 authentication module. T1 builds only the foundation:
-// the DB seam (this file), the HTTP handler skeleton (handler.go), and the
-// Bearer middleware skeleton. No business logic lives here yet — argon2 hashing,
-// login verification, token minting, refresh rotation/family replay detection,
-// and Bearer verification are all stubs filled by later tasks (T2-T7).
+// Package auth is the T2 authentication module. This file (port.go) declares the
+// narrow DB seam the module consumes. The module's business logic is fully
+// implemented as of T2: argon2id hashing (password.go), login + refresh handlers
+// (handler.go/login.go/refresh.go), token minting + family replay detection
+// (token.go), and Bearer verification middleware (middleware.go).
 //
 // DEPENDENCY DIRECTION (frozen contract): this package MUST NOT import
 // internal/http. It MAY import third-party libraries (pgx) and the generated

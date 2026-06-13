@@ -134,8 +134,8 @@
     {"id": "D8", "decision": "保留 T0 的 -smoke/db.Smoke 一次性裸连接不动,FR1 只替换服务运行时连接获取", "reason": "-smoke 是 T0 部署冒烟基础设施(T0 AC10/AC12 依赖),never break userspace;冒烟要最便宜证明 DSN+网络通,起池子反而更重", "override_if": "无"}
   ],
   "open_questions": [
-    {"id": "Q1", "question": "迁移工具最终选型?", "why_mingbo_owned": "会被 T2-T8 所有有状态站继承的长期工具链 lock-in;且维护者可能有 Prisma 声明式/knex 命令式的迁移心智偏好,工具手感是个人运维偏好", "recommended_default": "golang-migrate(纯 SQL up/down、生态最大、CLI+库两用、Neon 兼容,与 sqlc 纯 SQL 心智一致);已排除 atlas(声明式引入第二份 schema 真相源违 NFR6);候选 goose/tern(jackc 与 pgx 同源)亦可;T1 动手时定"},
-    {"id": "Q2", "question": "Neon 当前套餐连接数上限+用 pooler 端点还是直连端点?", "why_mingbo_owned": "套餐连接上限是明博云账号实际状态协调者无法查;pooler vs 直连端点连接语义不同(影响 MaxConns 取值),T0 已留此二选一坑", "recommended_default": "实现前确认当前套餐连接上限,pool_max_conns 取保守值(使×预期最大实例数≤上限);端点 pooler/直连二选一(缩零场景下唤醒/连接复用语义有别,实现时核实当前 Neon 文档);并入 T1 动手前置 checklist"}
+    {"id": "Q1", "question": "迁移工具最终选型?", "why_mingbo_owned": "会被 T2-T8 所有有状态站继承的长期工具链 lock-in;且维护者可能有 Prisma 声明式/knex 命令式的迁移心智偏好,工具手感是个人运维偏好", "recommended_default": "golang-migrate(纯 SQL up/down、生态最大、CLI+库两用、Neon 兼容,与 sqlc 纯 SQL 心智一致);已排除 atlas(声明式引入第二份 schema 真相源违 NFR6);候选 goose/tern(jackc 与 pgx 同源)亦可;T1 动手时定。【T1 实现期已关闭(回写于 2026-06-13):最终选 goose(jackc 系、与 pgx 同源,go 1.26 tool 指令锁在 tools/ 独立 module),非推荐默认的 golang-migrate;契合本仓 sqlc 纯 SQL 工作流】"},
+    {"id": "Q2", "question": "Neon 当前套餐连接数上限+用 pooler 端点还是直连端点?", "why_mingbo_owned": "套餐连接上限是明博云账号实际状态协调者无法查;pooler vs 直连端点连接语义不同(影响 MaxConns 取值),T0 已留此二选一坑", "recommended_default": "实现前确认当前套餐连接上限,pool_max_conns 取保守值(使×预期最大实例数≤上限);端点 pooler/直连二选一(缩零场景下唤醒/连接复用语义有别,实现时核实当前 Neon 文档);并入 T1 动手前置 checklist。【T1 实现期已关闭(回写于 2026-06-13):MaxConns 护栏已落地(pool.go:defaultMaxConns=5、硬上限 maxConnsCeiling=20,ceiling×最多2实例≤Neon端点上限);端点 pooler/直连由 NEON_DSN 运维配置承载,代码用保守 ceiling 对两种端点都安全兜底】"}
   ],
   "tasks": [
     {"id": "T1", "description": "选定迁移工具(Q1)+建 db/migrations/ 布局与命名约定+写基础设施自验载体的首对 up/down 迁移(事务内执行;down 数据安全规范:IRREVERSIBLE 标注+生产前滚)", "owner_agent": "implementer", "deps": [], "done_when": ["AC7"]},
