@@ -92,6 +92,12 @@ func main() {
 	smoke := flag.Bool("smoke", false, "run a one-shot Neon SELECT 1 reachability check and exit (does not start the HTTP server)")
 	seed := flag.Bool("seed", false, "create one user from SEED_USERNAME / SEED_PASSWORD (argon2id hashed) and exit (does not start the HTTP server)")
 	unlock := flag.Bool("unlock", false, "clear failed_attempts/locked_until for the user named in UNLOCK_USERNAME and exit (operational account-lockout recovery; does not start the HTTP server)")
+	signActive := flag.Bool("sign-active", false, "build a v2-signed offline-package active.json from OFFLINE_* env + flags and write it to stdout (or -o); exits without starting the HTTP server, touching the DB, or making any network request")
+	// signActiveFlags are read only when -sign-active is set. They are registered
+	// on the default FlagSet (alongside -smoke/-seed/-unlock) so a single
+	// `go run ./cmd/api -sign-active -version ... -digest ...` invocation parses
+	// them all in one pass.
+	saFlags := registerSignActiveFlags(flag.CommandLine)
 	flag.Parse()
 
 	if *smoke {
@@ -118,6 +124,16 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("unlock: ok")
+		return
+	}
+
+	if *signActive {
+		// Write the active.json to stdout directly. runSignActive performs the
+		// signing offline (no DB, no network) and reports any failure via the error.
+		if err := runSignActive(os.Stdout, saFlags); err != nil {
+			fmt.Fprintln(os.Stderr, "sign-active: failed:", err)
+			os.Exit(1)
+		}
 		return
 	}
 

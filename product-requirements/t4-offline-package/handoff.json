@@ -1,0 +1,128 @@
+{
+  "slug": "t4-offline-package",
+  "source_type": "execution_plan",
+  "mode": "L1",
+  "title": "T4 离线包 v2 扩展签名生成器(empty-tail 主形态,bit-exact 复刻 app 契约)",
+  "summary": "为 server-infra-toolkit 实现 T4 离线包 v2 扩展签名生成器:确定性 canonical payload builder + Ed25519 签名器,bit-exact 复刻 app-infra-toolkit 已定稿 v2 签名契约(contractVersion 1.0.0,sha256 pin 044a0e96…),使 server 产出的 active.json.signatureV2 通过 app 双端 v2 验签器。主形态 empty-tail。本站范围 = 生成器 + 自检 + 离线签发;生产发布 gated 待联调窗口。",
+  "goal_alignment": {
+    "status": "clear",
+    "target_user": "app 双端(Android/iOS)v2 验签器消费 server 产出的 signatureV2;直接 operator 是明博/server 维护者",
+    "problem": "server T4 离线包当前 roadmap 记的是旧 v1 签名格式(version + \\n + digest),v1 在 app v2 验签器上结构性失效;server 缺一个 bit-exact 复刻 app v2 契约的签名生成器,且 server 仓零 v1 代码,实为首次实现",
+    "success_outcome": "payload builder 产出 empty-tail canonical payload 字节 byte-for-byte 匹配 app 黄金向量,完整 signatureV2 通过本地 Ed25519 验签,且有防漂移 sha256 pin + CI round-trip 自检",
+    "scope_boundary": "仅 empty-tail 签名生成器 + 自检 + 离线签发能力;不含 /v1/manifest·/v1/package 端点、populated-tail、客户端验签、完整密钥管理(KMS/轮换)、生产发布编排",
+    "first_acceptance_signal": "emptyTail 向量 input tuple → builder 输出 hexdump byte-for-byte == 向量 expectedPayloadHex(AC1)",
+    "confidence": "high",
+    "alternatives_considered": []
+  },
+  "goals": [
+    "server 产出的 active.json.signatureV2 通过 app 双端 v2 验签器(跨仓联调验收)",
+    "payload builder 字节输出 byte-exact 匹配 app 黄金向量(server CI 内可自检)",
+    "防契约漂移:sha256 pin + CI round-trip + mutation 反例 gate"
+  ],
+  "non_goals": [
+    "/v1/manifest 与 /v1/package 端点(后续站)",
+    "populated-tail 形态(builder 参数化预留,当前唯一 case 是 empty-tail)",
+    "客户端验签实现(app 仓已落地)",
+    "完整密钥管理基础设施(KMS / 自动轮换 / 多 key 编排);但私钥安全落点非 non-goal",
+    "生产发布编排(把 signatureV2 写进真实生产 active.json 并上线)——gated 动作,前置 app PR#1 merge + 双端验签器全量铺达"
+  ],
+  "assumptions": [
+    {"id": "A1", "text": "app 仓 PR #1 已 merge 或将 merge,三文件(v2-signature-contract.md / canonical-payload-vectors.json / cross-repo-handoff.md)将在约定路径可用;实现前置(T1)", "confidence": "high"},
+    {"id": "A2", "text": "本站签发的 active.json 的 fileManifestHash/rollbackFloor 恒空(empty-tail 主形态),需 app cross-repo-handoff.md 核对(Q2)", "confidence": "medium"},
+    {"id": "A3", "text": "Go crypto/ed25519 标准库 = PureEd25519(RFC 8032,对完整消息签非预哈希变体),满足契约,无需新增第三方依赖", "confidence": "high"},
+    {"id": "A4", "text": "T4 范围聚焦签名生成器,/v1/manifest 与 /v1/package 端点延后(issue 待办四条 + roadmap)", "confidence": "high"}
+  ],
+  "requirements": [
+    {"id": "FR1", "type": "functional", "priority": "must", "description": "canonical payload builder 是确定性纯函数,输出 6 字段(sigV2Tag/version/digest/minAppVersion/fileManifestHash/rollbackFloor)按固定顺序、单 \\n(0x0A)分隔、无尾换行、无 BOM、UTF-8 编码的字节串"},
+    {"id": "FR2", "type": "functional", "priority": "must", "description": "主形态 empty-tail(fileManifestHash 与 rollbackFloor 均为空字符串),输出恰含 5 个 0x0A、末尾两字节为 0a 0a"},
+    {"id": "FR3", "type": "functional", "priority": "must", "description": "sigV2Tag 固定为 offline-package-sig-v2 作为 payload 第一行;该字面量在仓内仅出现于被 pin 的契约常量一处(反同源漂移)"},
+    {"id": "FR4", "type": "functional", "priority": "must", "description": "digest 以 sha256:<64 位 lower-hex> 形态进入 payload;builder 对输入做 lower-hex 规范化,对非 lower-hex 输入直接 reject(消除 verbatim 与 lower-hex 强制的歧义)"},
+    {"id": "FR5", "type": "functional", "priority": "must", "description": "字段值卫生:builder 拒绝任何含 \\r、裸 \\n、BOM 或控制字符的字段值"},
+    {"id": "FR6", "type": "functional", "priority": "must", "description": "签名用 crypto/ed25519(PureEd25519,RFC 8032,Go 标准库)对 canonical payload 签名,再 RFC 4648 标准 base64(带 padding,非 URL-safe),加 base64: 前缀"},
+    {"id": "FR7", "type": "functional", "priority": "must", "description": "公钥发布为 raw 32 字节标准 base64(带 padding),禁止 SPKI/X.509/DER 包装"},
+    {"id": "FR8", "type": "functional", "priority": "must", "description": "keyId 大小写敏感;签发路径强制只用状态为 active 的 keyId,用 minted(未铺达)keyId 签发则 fail-closed 拒绝且不产出 signatureV2"},
+    {"id": "FR9", "type": "functional", "priority": "must", "description": "私钥/keyId 一致性:签发前校验私钥派生的公钥 == keyId 映射的已发布公钥,不等则 fail-closed 拒签"},
+    {"id": "FR10", "type": "functional", "priority": "must", "description": "所有 canonical 字节构造的唯一出口是 builder 包;签名器、测试、工具一律调 builder,不在别处重复拼接 tag/字段/分隔符"},
+    {"id": "FR11", "type": "functional", "priority": "must", "description": "黄金向量从 app 仓 PR#1 权威产物 vendor(copy)进 server 仓并 go:embed;落 sha256 pin 文件 offline-package-v2-contract-pin.json 记录 vendored 文件自身 hash + 来源 app 仓 commit + contractVersion"},
+    {"id": "FR12", "type": "functional", "priority": "must", "description": "CI round-trip 自检:对 emptyTail 向量 input tuple,builder 输出 hexdump byte-for-byte == 向量 expectedPayloadHex;并含 mutation 反例集(upper-hex digest / 字段乱序 / 加尾 0x0A / 加 BOM / 非空 tail)断言产出不等或 builder reject"},
+    {"id": "FR13", "type": "functional", "priority": "must", "description": "本地 Ed25519 sign-verify 自验:用代码内固定测试密钥对签 empty-tail payload,用 FR7 形态公钥本地验签断言通过;篡改 payload 任一字节则验签失败"},
+    {"id": "FR14", "type": "functional", "priority": "must", "description": "签发入口为 cmd 一次性子命令(贴 cmd/api 现有 -smoke/-seed/-unlock 先例),给定输入 + 私钥 env 产出 active.json,不监听端口、不写 DB、不发起网络请求"},
+    {"id": "FR15", "type": "functional", "priority": "should", "description": "文档 supersede:在 T4 PRD/docs 声明 v2 签名 supersede roadmap prd.md:141 的 v1 描述,不改冻结 roadmap 正文"},
+    {"id": "NFR1", "type": "non_functional", "priority": "must", "description": "payload builder 确定性(无随机/时间/map 遍历顺序依赖),同输入在两个独立进程各运行一次输出字节完全相等;自检不需私钥"},
+    {"id": "NFR2", "type": "non_functional", "priority": "must", "description": "私钥包 config.Secret 类型(String/MarshalJSON/LogValue 全 [REDACTED],仅 Reveal 吐明文);私钥不出现在任何 stdout/日志/active.json 明文;生产私钥经 Secret Manager 注入 env(继承 roadmap NFR2/R6)"},
+    {"id": "NFR3", "type": "non_functional", "priority": "must", "description": "遵守 server 冻结契约:包依赖方向(builder 若落 internal/platform/* 绝不 import internal/http 或 internal/modules)、错误信封 append-only、config 仅 os.Getenv+.env、scripts/verify.sh 是 CI 唯一入口;pin gate 挂 go test 且不可 skip"},
+    {"id": "NFR4", "type": "non_functional", "priority": "must", "description": "sha256 pin gate 检测本地篡改(向量文件 hash 不等 pin 则 CI 退出非 0);明确不覆盖上游 diverge,后者靠跨仓 commit 纪律 NEEDS-SERVER-BUMP(对称 T5 NEEDS-CLIENT-BUMP,需 app 仓配合)"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC1", "description": "Given emptyTail 向量 input tuple,when 调 builder,then 输出 hexdump byte-for-byte 等于向量 expectedPayloadHex,且末尾两字节为 0x0a 0x0a、0x0A 出现恰 5 次", "verifiable_by": "automated_test", "requirement_refs": ["FR1", "FR2", "NFR1"]},
+    {"id": "AC2", "description": "Given 同一 input tuple,when 在两个独立进程各运行 builder 一次,then 两次输出字节完全相等", "verifiable_by": "automated_test", "requirement_refs": ["FR1", "NFR1"]},
+    {"id": "AC3", "description": "Given digest 含大写 hex 如 sha256:AABB…,when 调 builder,then 规范化为 lower-hex 或返回错误,产出的 payload 不含大写 hex", "verifiable_by": "automated_test", "requirement_refs": ["FR4"]},
+    {"id": "AC4", "description": "Given 某字段值含 \\r、BOM 或控制字符,when 调 builder,then 返回错误且不产出 payload", "verifiable_by": "automated_test", "requirement_refs": ["FR5"]},
+    {"id": "AC5", "description": "Given 全仓源码,when grep offline-package-sig-v2 字面量,then 仅在被 pin 的契约常量一处出现;把该字面量改为 offline-package-sig-V2 则 pin gate 退出非 0", "verifiable_by": "code_review", "requirement_refs": ["FR3", "FR10"]},
+    {"id": "AC6", "description": "Given 固定测试密钥对,when 用 builder 加 ed25519.Sign 产出 signatureV2,then 该字段为 base64: 前缀加标准 base64 带 padding,公钥序列化为 raw 32 字节标准 base64(解码后恰 32 字节,非 44)", "verifiable_by": "automated_test", "requirement_refs": ["FR6", "FR7", "FR13"]},
+    {"id": "AC7", "description": "Given 测试密钥对加 empty-tail payload,when ed25519.Verify(公钥, payload, 解码签名),then 返回 true;篡改 payload 任一字节后返回 false", "verifiable_by": "automated_test", "requirement_refs": ["FR12", "FR13"]},
+    {"id": "AC8", "description": "Given mutation 集(upper-hex digest / 字段乱序 / 加尾 0x0A / 加 BOM / 非空 tail),when 运行 CI 自检,then 每个变异的 builder 输出 hexdump 不等于 expectedPayloadHex 或 builder 拒绝", "verifiable_by": "automated_test", "requirement_refs": ["FR12"]},
+    {"id": "AC9", "description": "Given vendored 黄金向量文件,when 篡改其一字节或删除该文件后跑 bash scripts/verify.sh,then 退出码非 0(pin gate 不可 skip)", "verifiable_by": "automated_test", "requirement_refs": ["FR11", "NFR3", "NFR4"]},
+    {"id": "AC10", "description": "Given keyId 状态为 minted 或私钥派生公钥不等于 keyId 映射公钥,when 调签发路径,then fail-closed 返回错误且不产出 signatureV2", "verifiable_by": "automated_test", "requirement_refs": ["FR8", "FR9"]},
+    {"id": "AC11", "description": "Given 私钥经 config 加载,when 序列化或打日志,then 输出 [REDACTED];CI 守卫断言私钥明文不出现在 stdout/日志路径", "verifiable_by": "automated_test", "requirement_refs": ["NFR2"]},
+    {"id": "AC12", "description": "Given 签发子命令,when 给定输入 env 执行,then 产出 active.json 且退出码 0,不监听端口、不发起网络请求、不写 DB", "verifiable_by": "automated_test", "requirement_refs": ["FR14"]},
+    {"id": "AC13", "description": "Given T4 PRD/docs,when review,then 含 v2 supersede roadmap v1 的声明,且 git diff 不含对 roadmap prd.md 正文的删改", "verifiable_by": "code_review", "requirement_refs": ["FR15"]},
+    {"id": "AC14", "description": "Given builder 落点,when go list -deps 该包,then 输出不含 internal/http;若落 internal/platform/* 则也不含 internal/modules", "verifiable_by": "automated_test", "requirement_refs": ["NFR3"]},
+    {"id": "AC15", "description": "Given vendored 向量文件,when review,then 文件记录来源 app 仓 PR#1 commit hash 加 contractVersion 加 sha256,且 PRD 标注 pin 不覆盖上游 diverge 的能力边界", "verifiable_by": "code_review", "requirement_refs": ["FR11", "NFR4"]}
+  ],
+  "edge_cases": [
+    {"id": "E1", "description": "digest 大写/混合大小写 hex 输入", "expected_behavior": "normalize 为 lower-hex 或 reject(AC3),绝不原样签入"},
+    {"id": "E2", "description": "字段值含 \\r/裸 \\n/BOM/控制字符", "expected_behavior": "reject,不产出 payload(AC4)"},
+    {"id": "E3", "description": "非空 tail(populated-tail)输入", "expected_behavior": "当前形态显式 reject;严防空字段跳过把末尾 0a0a 写成 0a 导致整签废"},
+    {"id": "E4", "description": "keyId 处于 minted 状态被用于签发", "expected_behavior": "fail-closed 拒签(AC10)"},
+    {"id": "E5", "description": "私钥派生公钥与 keyId 映射公钥不匹配(轮换错配)", "expected_behavior": "fail-closed 拒签(AC10)"},
+    {"id": "E6", "description": "app 仓 PR#1 未 merge 或向量文件缺失", "expected_behavior": "vendor task T1 阻塞;CI 缺向量退出非 0(非 skip)"},
+    {"id": "E7", "description": "上游 app 改了字节规格但 server pin 未 bump", "expected_behavior": "CI 绿但跨仓失配(pin 能力边界 R4),靠 NEEDS-SERVER-BUMP 跨仓纪律 + 人工对账"},
+    {"id": "E8", "description": "签发抢跑(app v2 验签器未全量铺达)", "expected_behavior": "app unknownKeyId/unknown sigVersion fail-closed 可用性事故;发布 gate(Q1/D9)拦截"}
+  ],
+  "risks": [
+    {"id": "R1", "description": "向量初始转录错(source 非 app 权威产物),builder 比对同源错误向量导致 self-consistent 假绿", "impact": "high", "likelihood": "medium", "mitigation": "从 app PR#1 权威产物逐字节 copy + 记录来源 commit + provenance 可追溯(FR11/AC15)", "owner": "engineering"},
+    {"id": "R2", "description": "server 抢跑写 signatureV2 进生产,app fail-closed 可用性事故", "impact": "high", "likelihood": "medium", "mitigation": "发布 gate(app PR#1 merge + 双端验签器全量铺达前不写生产 active.json)+ keyId 状态机(D9/FR8)", "owner": "Mingbo"},
+    {"id": "R3", "description": "字节级低级错(大写 hex / base64 变体 / 空字段吞行 / BOM / \\r)导致极难排查的验签失败", "impact": "high", "likelihood": "medium", "mitigation": "lower-hex normalize + 字段卫生 reject + mutation 反例集 + 本地 sign-verify round-trip(FR4/FR5/FR12/FR13)", "owner": "engineering"},
+    {"id": "R4", "description": "pin 只防本地篡改不防上游 diverge,被误读为防住了", "impact": "medium", "likelihood": "medium", "mitigation": "PRD 诚实标注能力边界 + NEEDS-SERVER-BUMP 跨仓纪律 + 定期人工对账(NFR4/AC15)", "owner": "engineering"},
+    {"id": "R5", "description": "私钥泄露或签错 keyId", "impact": "high", "likelihood": "low", "mitigation": "Secret 包装 + 不进日志 + 私钥/keyId 一致性启动校验(NFR2/FR9)", "owner": "engineering"},
+    {"id": "R6", "description": "empty-tail 前提失效(真实 active.json 迟早带 fileManifestHash),FR11 与 non-goal 冲突", "impact": "medium", "likelihood": "medium", "mitigation": "tail 段参数化预留 + PRD 显式声明前提 + 前提失效则扩 builder/开新站(D7/D10/Q2)", "owner": "product"}
+  ],
+  "default_decisions": [
+    {"id": "D1", "decision": "按首次实现 v2 生成器立 PRD(server 仓零 v1 代码)", "reason": ".go 文件无任何 offline-package/v1 签名实现,v1 仅存于 roadmap 文字(第一手 grep 证实)", "override_if": "实际在某分支已有 v1 签名代码需迁移"},
+    {"id": "D2", "decision": "落点 = builder 纯函数落 internal/platform/offlinesig(或 internal/offlinesig),签名器+签发 = cmd 一次性子命令,不走 HTTP/不写 DB", "reason": "签名生成不在请求路径、不产端点,塞 modules 是形态错配;builder 纯函数应可被无密钥环境复用", "override_if": "明博要求 on-demand HTTP 签发端点"},
+    {"id": "D3", "decision": "私钥包 config.Secret,env 注入(base64 32 字节 seed),config.Load 校验;keyId/公钥不敏感不包 Secret", "reason": "对齐 NEON_DSN Secret 先例 + roadmap NFR2", "override_if": "私钥改走运行时外置(硬件/离线机)不进 config"},
+    {"id": "D4", "decision": "vendor 黄金向量 = copy + go:embed,pin vendored 文件自身 sha256;CI gate fail-closed 不可 skip;上游 diverge 靠 NEEDS-SERVER-BUMP 跨仓纪律", "reason": "server CI 读不到 app 仓文档只能 pin 仓内副本;submodule 在 Go module + Cloud Run build 链是已知麻烦", "override_if": "改用 app 仓发布的 signed artifact 拉取机制"},
+    {"id": "D5", "decision": "digest 强制 lower-hex normalize + reject 非 lower-hex 输入", "reason": "消除原契约 verbatim 歧义,堵住 digest 校验过、签名校验过不了的极难排查坑", "override_if": "app 契约明确要求 verbatim 保留大小写(需核对)"},
+    {"id": "D6", "decision": "字段值卫生:reject 含 \\r/裸 \\n/BOM/控制字符的字段值", "reason": "empty-tail 测不到字段内脏字节,Windows \\r\\n 等会静默污染 payload", "override_if": "契约要求对某字段保留特定字节"},
+    {"id": "D7", "decision": "builder tail 段参数化(预留 populated-tail),empty-tail 是当前唯一 case,不焊死两尾空在主路径", "reason": "低成本(一个函数参数)预留 v2.1 演进,不破 empty-tail", "override_if": "确认永不需要 populated-tail"},
+    {"id": "D8", "decision": "本站验收 = server 内部 byte-exact + 本地 Ed25519 sign-verify round-trip;app 双端实测验签是跨仓联调验收,non-blocking for server CI", "reason": "app 验签器在 app 仓 server CI 不可触达;不能让 CI 卡在跨仓结果上", "override_if": "引入 app 验签器的可执行 conformance 工具进 server CI"},
+    {"id": "D9", "decision": "范围红线:本站 = 生成器 + 自检 + 离线签发;生产发布 gated,前置 app PR#1 merge + 双端验签器全量铺达;落 keyId 状态机 + 发布前置 fail-closed gate,翻转需人工确认", "reason": "roadmap 标 T4 待客户端联调窗口,抢跑 = 可用性事故;PRD 阶段给最保守 default 不卡锻造", "override_if": "见 Q1(明博改发布时序决策)"},
+    {"id": "D10", "decision": "empty-tail 恒空作为本站前提显式声明;前提失效则扩 builder/开新站", "reason": "issue 明示 empty-tail 主形态,但真实 active.json tail 是否恒空需 app 核对", "override_if": "见 Q2(明博确认真实 tail 形态)"}
+  ],
+  "open_questions": [
+    {"id": "Q1", "question": "跨仓发布时序:signatureV2 何时写进生产 active.json 并发布?", "why_mingbo_owned": "依赖 app PR#1 已 merge + 双端 v2 验签器全量铺达这个外部发版事实,server 仓无法自动判定;何时认定铺达完成、是否等灰度、出事谁回滚属跨仓发布承诺", "recommended_default": "本站范围切到生成器+自检+离线签发,生产发布作为后续 gated 动作待联调窗口;server 端落 keyId 状态机(minted→active)+ 发布前置 fail-closed gate,翻转动作明博手动确认后执行(D9)"},
+    {"id": "Q2", "question": "本站生产签发的真实 active.json,fileManifestHash 与 rollbackFloor 是否恒为空字符串?", "why_mingbo_owned": "取决于 T4 离线包业务设计(首版是否携带文件清单/回滚地板),是产品范围决策,且直接决定 FR11 集成 active.json 与 non-goal populated-tail 是否冲突", "recommended_default": "按 issue 明示的 empty-tail 主形态,假定本站签发的 active.json tail 恒空,builder 把 tail 段参数化预留 populated-tail(D7);前提失效则扩 builder 或开新站,实现前从 app cross-repo-handoff.md 核对(T1)"}
+  ],
+  "tasks": [
+    {"id": "T1", "description": "vendor app 仓 PR#1 三文件(v2-signature-contract.md / canonical-payload-vectors.json / cross-repo-handoff.md)进 server 仓并核对字节细节(active.json wire、payload↔active.json 字段映射、公钥 base64 变体、私钥编码、向量值);确认 app PR#1 已 merge;确认 Q1/Q2", "owner_agent": "main_coordinator", "deps": [], "done_when": ["AC15"]},
+    {"id": "T2", "description": "实现 canonical payload builder 纯函数(字节规格 + empty-tail + lower-hex normalize + 字段卫生 + 确定性 + 单一出口),go:embed 黄金向量 + pin 常量", "owner_agent": "implementer", "deps": ["T1"], "done_when": ["AC1", "AC2", "AC3", "AC4", "AC5"]},
+    {"id": "T3", "description": "实现 Ed25519 签名 + 标准 base64 编码 + 公钥 raw 序列化 + signatureV2 字段组装", "owner_agent": "implementer", "deps": ["T2"], "done_when": ["AC6", "AC7"]},
+    {"id": "T4", "description": "实现 keyId 状态机(minted/active)+ 私钥/keyId 一致性校验 + 私钥 config.Secret 包装 + config 注入校验", "owner_agent": "implementer", "deps": ["T2"], "done_when": ["AC10", "AC11"]},
+    {"id": "T5", "description": "实现签发 cmd 一次性子命令(产 active.json,不端口/不 DB/不联网)", "owner_agent": "implementer", "deps": ["T3", "T4"], "done_when": ["AC12"]},
+    {"id": "T6", "description": "CI round-trip 正例 + mutation 反例集 + pin gate(挂 verify.sh/go test,fail-closed 不可 skip)+ 依赖方向守卫测试", "owner_agent": "test-runner", "deps": ["T2", "T3"], "done_when": ["AC8", "AC9", "AC14"]},
+    {"id": "T7", "description": "文档:T4 docs 声明 v2 supersede roadmap v1(不改冻结正文)+ 标注 pin 能力边界 + NEEDS-SERVER-BUMP 跨仓纪律", "owner_agent": "main_coordinator", "deps": ["T1"], "done_when": ["AC13", "AC15"]},
+    {"id": "T8", "description": "异源 Codex review + reviewer 复审字节正确性 + evaluator 按 AC 逐条验收", "owner_agent": "reviewer", "deps": ["T5", "T6", "T7"], "done_when": ["AC1", "AC6", "AC7", "AC8", "AC9", "AC10", "AC12"]}
+  ],
+  "artifact_paths": {
+    "prd": "product-requirements/t4-offline-package/prd.md",
+    "handoff": "product-requirements/t4-offline-package/handoff.json"
+  },
+  "next_prompt": "用这份 handoff 实现 T4 v2 签名生成器。第一步执行 T1(vendor app 仓 PR#1 三文件 + 核对 active.json wire/公钥编码/向量值 + 确认 PR#1 已 merge),核对后按 T2→T8 推进。发布时序(Q1)与 empty-tail 恒空前提(Q2)在实现前与明博确认。落点按 D2(builder 落 internal/platform/offlinesig,签发走 cmd 子命令)。",
+  "provenance": {
+    "coordinator_run": true,
+    "parallel_roles": ["codebase-scan", "requirement", "redteam", "implementation", "architecture"],
+    "codex_used": false,
+    "codex_downgraded": false
+  }
+}
