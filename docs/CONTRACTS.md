@@ -70,7 +70,8 @@
 │   └── platform/
 │       ├── config/                [T0 实体] 配置加载(os.Getenv + .env)
 │       ├── log/                   [T0 实体] 结构化日志
-│       └── db/                    [T0 骨架→T1 实体] pgx 连接池/重试;gen/ 为 sqlc 生成代码
+│       ├── db/                    [T0 骨架→T1 实体] pgx 连接池/重试;gen/ 为 sqlc 生成代码
+│       └── offlinesig/            [T4 实体] 离线包 v2 扩展签名(canonical payload 字节/Ed25519/active.json 组装);contract/ 为 vendored app 契约 + sha256 pin
 ├── db/
 │   └── migrations/                [T1 实体] goose 迁移(schema 单一真相源)
 ├── sql/                           [T1/T2 实体] sqlc query 源(auth.sql 等)
@@ -171,3 +172,19 @@ T6 把部署运行时从「能跑」升级为「已验证」:Cloud Run startup p
 - **无主动探测(NFR1)**:T6 不新增任何周期性请求服务的任务(Cloud Scheduler/cron/CI 定时);监控只用云厂商被动侧数据(GCP budget alert 邮件 + Neon 控制台手查)。
 - **probe 期望值落 runbook + describe 只读对账(R3 漂移检查)**:startup probe 只配指向 `/livez`(参数 `initialDelaySeconds=0, periodSeconds=10, timeoutSeconds=1, failureThreshold=6`,冷启动余量 60s);**不配 liveness probe**(D4,进程挂死发现手段缺位记为已接受风险 R1)。GCP 侧手工配置的期望值落 `docs/DEPLOY.md §10`,部署检查清单含一次 `gcloud run services describe` 只读对账。**Cloud Run 关停宽限期 = 平台固定 10s 常量**(不可配、不出现在 describe),与 `cmd/api` 关停预算锚定断言(HTTP 排空 + 池关闭之和 ≤ 10s)是同一数值,两处同步纪律见 `docs/DEPLOY.md §10.5`。
 - **坐标占位纪律(NFR2)**:真实 GCP 坐标(project number / region / 服务域名 / billing account)**只存在于本地 `.env`**,文档与脚本一律占位符;脚本从 `gcloud config` / `.env` / 参数取值,不硬编码。全仓坐标 grep 自查模式与白名单见 `docs/DEPLOY.md §14`,落地后全仓 grep 无真实坐标命中。
+
+---
+
+## 9. T4 范围声明(离线包签名站,纯 append)
+
+T4 给服务端新增离线包 v2 扩展签名能力:`internal/platform/offlinesig/` 子包(canonical payload 字节构造 + PureEd25519 签名 + 公钥/签名 wire 编码 + active.json 组装),签发入口为 `cmd/api -sign-active` 一次性子命令(产出 v2 签名的 active.json 到 stdout/`-o`,**不起 HTTP、不碰 DB、不联网**)。本节为纯 append,**未改写/删除任何既有冻结项**。完整设计取舍见 `product-requirements/t4-offline-package/`(PRD + `SUPERSEDE.md`)。
+
+- **真相源归属反转(关键,与 T3/T5 相反)**:T3/T5 的 wire 真相源在**服务端**(server 产 wire,客户端消费);T4 的 v2 签名契约真相源在**客户端 `app-infra-toolkit`**(app 已定稿 contractVersion `1.0.0`),**服务端是消费/复刻方**。server 把 app 的三份契约文件 vendored 进 `internal/platform/offlinesig/contract/`(`v2-signature-contract.md` 规格 + `canonical-payload-vectors.json` 黄金向量 + `verify-extended-cases.json` interop 已知答案向量)并 sha256 pin。因此 **v2 wire 的冻结权归 app 仓,本仓库 §1 frozen 集不纳入 v2 wire**——server 只承担"vendored 副本对自身一致 + 跨仓 bump 纪律"。
+- **canonical payload 字节契约(bit-exact,真相源见 vendored 规格)**:`UTF8("offline-package-sig-v2" + LF + version + LF + digest + LF + minAppVersion + LF + fileManifestHash + LF + rollbackFloor)`,六字段固定顺序、单 `0x0A` 分隔恰 5 个、无尾换行 / 无 BOM / 无 CRLF;首行常量 tag 域分隔使旧 v1 签名结构性失效;digest 强制 lower-hex normalize。主形态 **empty-tail**(`fileManifestHash`/`rollbackFloor` 均空串,payload 以两 `0x0A` 结束)。wire 编码:`signatureV2 = "base64:" + StdEncoding(64 字节签名)`(标准 +/ 带 padding,非 URL-safe),公钥 = `StdEncoding(RAW 32 字节)`(非 SPKI/DER)。字段卫生 allowlist 仅可打印 ASCII `[0x20,0x7E]`,拒一切其他字节(injectivity 防换行重切)。
+- **工件落点与依赖方向(兑现 §1.1 + §1.3#1 + §4)**:`internal/platform/offlinesig/` 是 platform 下新增子包(§4「新增子包 = append 直接允许」;第一层目录集合仍与 §1.1 一致)。子包落 platform 最底层,**不 import** `internal/http` / `internal/modules`(`deps_guard_test.go` 用 `go list -deps` 强制)。`active.json` 的 wire 形状(`ActiveManifest`)由 app 反序列化器消费,字段名/类型对齐 app 黄金 schema。
+- **config 机制(兑现 §1.3#4)**:`-sign-active` 新增四个 env(`OFFLINE_SIGN_PRIVATE_KEY` 唯一 secret、包 `config.Secret` 不回显;`OFFLINE_SIGN_KEY_ID`;`OFFLINE_SIGN_ACTIVE_KEY_IDS`;`OFFLINE_SIGN_EXPECTED_PUBLIC_KEY`),仍只用 `os.Getenv`+`.env`(模板在 `.env.example`),不引入新配置来源;子命令不调 `config.Load()`(无 `NEON_DSN` 依赖)。
+- **两道 fail-closed 闸(签发安全契约)**:(1) **FR8 发布时序闸**——keyId 只有列入 `OFFLINE_SIGN_ACTIVE_KEY_IDS`(Active)才签,否则视为 Minted 拒签;加进该列表前必须先确认 app 端该 keyId 公钥已双端全量铺达,抢跑 = app unknownKeyId 可用性事故(D9),提升 Active 是刻意人工动作。(2) **FR9 私钥↔keyId 一致性闸**——校验注入私钥派生公钥**恰等于** `OFFLINE_SIGN_EXPECTED_PUBLIC_KEY`(独立 env、operator 从 app 发布记录抄,**非从私钥自派生**——自派生会让校验恒真空转),不等则 `ErrKeyMismatch` 拒签,挡"签出 app 用已发布公钥验不过的签名"这类静默 desync。
+- **契约 pin fail-closed(go:embed + init)**:`offlinesig` 包 `init()` 对 vendored 文件做 sha256 pin 校验(`offline-package-v2-contract-pin.json` 记 app 源 commit + sha256),篡改/删除 → init panic 使 build/test 红(`scripts/verify.sh` 覆盖,不可 skip);正反双向守卫(每个被 pin 文件须 embed 且匹配 + 每个 embed 契约文件须被 pin)。**pin 只防本地篡改,不防上游 diverge**:app 改字节规格而 server 未 bump 时 server CI 仍绿。
+- **NEEDS-SERVER-BUMP 跨仓纪律(对称 T5 的 `NEEDS-CLIENT-BUMP`)**:app 仓改 v2 字节规格(字段/顺序/分隔/编码/tag)的 commit 必须打 `NEEDS-SERVER-BUMP` 标记,提示 server re-vendor 三份契约 + 重算 pin 的 sha256/`source_commit` + 重跑 `verify.sh` 让黄金/interop 向量重新对齐绿。上游 diverge 缺口靠此纪律 + 定期人工对账兜底(NFR4),非机器自动检出。
+- **roadmap v1 描述被 supersede(不改冻结正文)**:`product-requirements/server-infra-roadmap/prd.md:141` 把 offline-package 签名记为 v1(`UTF8(version+LF+digest)`),那是锻造期线索、非落地实现;现行真相为 v2 扩展签名,`SUPERSEDE.md` 在 supersede 关系上覆盖它,roadmap 正文不删不改。
+- **错误信封**:T4 签发是 CLI 子命令、不走 HTTP,**不碰错误信封**(无 append)。
